@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-自动推送Python代码到Git仓库的脚本
+自动推送Python代码到GitHub仓库的脚本（HTTPS版本）
 每天凌晨12点自动执行
+使用Personal Access Token进行认证
 """
 
 import os
@@ -21,8 +22,11 @@ CONFIG = {
     'PROJECT_PATH': '/home/maxon/disk2/roomMatch/room_match',
 
     # Git配置
-    'GIT_REMOTE': 'github',  # 远程仓库名称，使用GitHub
-    'GIT_BRANCH': 'dev_rtm',    # 推送分支，使用已存在的dev_rtm分支
+    'GIT_REMOTE': 'github-https',  # 远程仓库名称
+    'GIT_BRANCH': 'main',    # 推送分支
+    'GITHUB_REPO_URL': 'https://github.com/2829241525/tourmind.git',  # GitHub仓库HTTPS地址
+    'GITHUB_TOKEN': '',  # GitHub Personal Access Token（需要用户设置）
+    'GITHUB_USERNAME': '2829241525',  # GitHub用户名
 
     # 文件扫描配置
     'FILE_PATTERNS': ['*.py'],  # 需要追踪的文件模式
@@ -60,6 +64,22 @@ def setup_logging():
 
 
 logger = setup_logging()
+
+# ==================== Token检查 ====================
+
+
+def check_github_token():
+    """检查GitHub Token是否配置"""
+    token = CONFIG['GITHUB_TOKEN']
+    if not token:
+        # 尝试从环境变量获取
+        token = os.environ.get('GITHUB_TOKEN')
+        if token:
+            CONFIG['GITHUB_TOKEN'] = token
+        else:
+            logger.error("GitHub Token未配置！请设置GITHUB_TOKEN环境变量或在配置中填写")
+            return False
+    return True
 
 # ==================== 文件缓存管理 ====================
 
@@ -128,6 +148,45 @@ class GitPusher:
     def __init__(self, project_path):
         self.project_path = project_path
         self.cache = FileCache(CONFIG['CACHE_FILE'])
+        self._setup_remote()
+
+    def _setup_remote(self):
+        """设置远程仓库"""
+        if not check_github_token():
+            return False
+
+        try:
+            # 构建带Token的URL
+            token = CONFIG['GITHUB_TOKEN']
+            username = CONFIG['GITHUB_USERNAME']
+            repo_url = f"https://{username}:{token}@github.com/{username}/tourmind.git"
+
+            # 检查远程仓库是否存在
+            result = subprocess.run(
+                ['git', 'remote', 'get-url', CONFIG['GIT_REMOTE']],
+                cwd=self.project_path,
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                # 添加远程仓库
+                subprocess.run([
+                    'git', 'remote', 'add', CONFIG['GIT_REMOTE'], repo_url
+                ], cwd=self.project_path, check=True)
+                logger.info(f"添加远程仓库: {CONFIG['GIT_REMOTE']}")
+            else:
+                # 更新远程仓库URL
+                subprocess.run([
+                    'git', 'remote', 'set-url', CONFIG['GIT_REMOTE'], repo_url
+                ], cwd=self.project_path, check=True)
+                logger.info(f"更新远程仓库URL: {CONFIG['GIT_REMOTE']}")
+
+            return True
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"设置远程仓库失败: {e}")
+            return False
 
     def find_python_files(self):
         """查找所有Python文件"""
@@ -223,7 +282,7 @@ class GitPusher:
                 'git', 'push', CONFIG['GIT_REMOTE'], CONFIG['GIT_BRANCH']
             ], check=True)
 
-            logger.info("推送到远程仓库成功")
+            logger.info("推送到GitHub仓库成功")
 
             # 保存缓存
             self.cache.save()
@@ -241,6 +300,10 @@ class GitPusher:
         logger.info("开始执行自动推送任务")
 
         try:
+            # 检查Token配置
+            if not check_github_token():
+                return
+
             # 检查文件变化
             changed_files = self.check_changes()
 
@@ -293,9 +356,10 @@ def start_scheduler():
 def main():
     """主函数"""
     logger.info("="*50)
-    logger.info("自动Git推送服务启动")
+    logger.info("自动Git推送服务启动（HTTPS版本）")
     logger.info(f"项目路径: {CONFIG['PROJECT_PATH']}")
     logger.info(f"远程仓库: {CONFIG['GIT_REMOTE']}")
+    logger.info(f"GitHub仓库: {CONFIG['GITHUB_REPO_URL']}")
     logger.info(f"目标分支: {CONFIG['GIT_BRANCH']}")
     logger.info(f"执行时间: 每天 {CONFIG['SCHEDULE_TIME']}")
     logger.info("="*50)
