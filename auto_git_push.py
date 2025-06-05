@@ -25,7 +25,7 @@ CONFIG = {
     'GIT_BRANCH': 'dev_rtm',    # 推送分支，使用已存在的dev_rtm分支
 
     # 文件扫描配置
-    'FILE_PATTERNS': ['*.py'],  # 需要追踪的文件模式
+    'FILE_PATTERNS': ['*.py', '*.sh'],  # 需要追踪的文件模式，包含Python和Shell脚本
     # 排除的目录
     'EXCLUDE_DIRS': ['.git', '__pycache__', '.vscode', 'cache', 'output', 'results'],
 
