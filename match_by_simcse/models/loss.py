@@ -31,28 +31,6 @@ class SupervisedInfoNCELoss(nn.Module):
         Returns:
             loss: 有监督的InfoNCE损失值
         """
-        # 对向量进行L2归一化
-        # anchor_embeddings = F.normalize(anchor_embeddings, p=2, dim=1)
-        # target_embeddings = F.normalize(target_embeddings, p=2, dim=1)
-        
-        # # 计算相似度矩阵
-        # sim_matrix = torch.matmul(anchor_embeddings, target_embeddings.t()) / self.temperature
-        
-        # # 构造标签矩阵 - 只有当两个样本都是正样本(标签为1)时才认为是正例对
-        # pos_mask = (labels == 1).float()
-        # labels_matrix = torch.diag(pos_mask)
-        
-        # # 计算正例和负例的损失
-        # exp_sim = torch.exp(sim_matrix)
-        # log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True))
-        
-        # # 计算每个样本的损失，只考虑正样本的损失
-        # mean_log_prob_pos = (labels_matrix * log_prob).sum(1) / labels_matrix.sum(1).clamp(min=1e-8)
-        # # 只对正样本计算损失
-        # valid_mask = (labels == 1).float()
-        # loss = -(mean_log_prob_pos * valid_mask).sum() / valid_mask.sum().clamp(min=1e-8)
-        # return loss 
-
         # 对比损失（仅正样本）
         anchor_norm = F.normalize(anchor_embeddings, p=2, dim=1)
         target_norm = F.normalize(target_embeddings, p=2, dim=1)

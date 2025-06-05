@@ -266,7 +266,8 @@ def main():
 
     parser = argparse.ArgumentParser(description='训练日志可视化工具')
     parser.add_argument('--log_dir', type=str, default=log_dir, help='日志目录路径')
-    parser.add_argument('--pattern', type=str, default='training_log_*.json', help='日志文件匹配模式')
+    parser.add_argument('--pattern', type=str,
+                        default='training_log_20250407_224110.json', help='日志文件匹配模式')
     parser.add_argument('--save_dir', type=str, default=reports_dir, help='保存报告的目录')
     args = parser.parse_args()
     

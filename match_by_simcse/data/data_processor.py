@@ -163,8 +163,8 @@ def main():
     parser = argparse.ArgumentParser(description='数据处理工具')
 
     # 基本参数
-    parser.add_argument('--input', type=str, default='processed_country.csv',
-                        help='输入CSV文件路径 (默认: processed_country.csv)')
+    parser.add_argument('--input', type=str, default='processed_jp.csv',
+                        help='输入CSV文件路径 (默认: processed_jp.csv)')
     parser.add_argument('--mode', type=str,
                         choices=['extract', 'split'], default='split',
                         help='处理模式 (默认: split)')
@@ -180,12 +180,12 @@ def main():
                         help='验证集比例 (默认: 0.1)')
     parser.add_argument('--test-size', type=float, default=0.1,
                         help='测试集比例 (默认: 0.1)')
-    parser.add_argument('--train-file', type=str, default='processed_country_train.csv',
-                        help='训练集输出路径 (默认: processed_country_train.csv)')
-    parser.add_argument('--valid-file', type=str, default='processed_country_valid.csv',
-                        help='验证集输出路径 (默认: processed_country_valid.csv)')
-    parser.add_argument('--test-file', type=str, default='processed_country_test.csv',
-                        help='测试集输出路径 (默认: processed_country_test.csv)')
+    parser.add_argument('--train-file', type=str, default='processed_jp_train.csv',
+                        help='训练集输出路径 (默认: processed_jp_train.csv)')
+    parser.add_argument('--valid-file', type=str, default='processed_jp_valid.csv',
+                        help='验证集输出路径 (默认: processed_jp_valid.csv)')
+    parser.add_argument('--test-file', type=str, default='processed_jp_test.csv',
+                        help='测试集输出路径 (默认: processed_jp_test.csv)')
     parser.add_argument('--random-state', type=int, default=42,
                         help='随机种子 (默认: 42)')
 

@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # 配置信息
 CONFIG = {
-    'API_URL': 'http://10.0.0.110:8100/match',
+    'API_URL': 'http://10.0.0.110:8201/match',
     'HEADERS': {
         'User-Agent': 'Mozilla/5.0',
         'Content-Type': 'application/json',
@@ -28,15 +28,20 @@ CONFIG = {
         'Connection': 'keep-alive'
     },
     'BATCH_SIZE': 100,  # 减小批处理大小
-    'SIMILARITY_THRESHOLD': 0.65,  # 相似度阈值
-    'INPUT_FILE': '../data/supply_country_info.csv',
-    'OUTPUT_FILE': '../data/positive_country.csv',
-    'UNMATCH_FILE': '../data/unmatch_country.csv',  # 新增未匹配数据输出文件
+    'SIMILARITY_THRESHOLD': 0.5,  # 相似度阈值
+    'INPUT_FILE': '../data/room_data_CN.csv',
+    'OUTPUT_FILE': '../data/positive_cn.csv',
+    'UNMATCH_FILE': '../data/unmatch_cn.csv',  # 新增未匹配数据输出文件
     # 'INPUT_FILE': 'room_match/data/supply_system_info.csv',
     # 'OUTPUT_FILE': 'room_match/data/positive_system.csv',
     'MAX_RETRIES': 3,  # 最大重试次数
     'RETRY_DELAY': 1,  # 重试延迟（秒）
 }
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+input_file = os.path.join(current_dir, CONFIG['INPUT_FILE'])
+output_file = os.path.join(current_dir, CONFIG['OUTPUT_FILE'])
+unmatch_file = os.path.join(current_dir, CONFIG['UNMATCH_FILE'])
 
 def clean_float_for_json(value):
     """
@@ -84,7 +89,8 @@ def prepare_batch_data(batch_rows: pd.DataFrame) -> Dict[str, List[str]]:
         "spl_room_bed_names": [],
         "s_room_names": [],
         "s_room_bed_names": [],
-        "threshold": CONFIG['SIMILARITY_THRESHOLD']
+        "threshold": CONFIG['SIMILARITY_THRESHOLD'],
+        "model": "cross_entropy_0414_ev1"
     }
     
     # 处理每一行数据
@@ -98,9 +104,9 @@ def prepare_batch_data(batch_rows: pd.DataFrame) -> Dict[str, List[str]]:
             s_room_bed_name = clean_text(row['s_room_bed_name'])
             
             # 验证必需字段不为空
-            if not spl_room_name or not s_room_name:
-                logging.warning(f"行数据包含空值: supplier_name={supplier_name}, spl_room_name={spl_room_name}, s_room_name={s_room_name}")
-                continue
+            # if not spl_room_name or not s_room_name:
+            #     logging.warning(f"行数据包含空值: supplier_name={supplier_name}, spl_room_name={spl_room_name}, s_room_name={s_room_name}")
+            #     continue
             
             # 添加到处理后的数据中
             processed_data["supplier_names"].append(supplier_name or "")
@@ -118,7 +124,7 @@ def prepare_batch_data(batch_rows: pd.DataFrame) -> Dict[str, List[str]]:
         raise ValueError("处理后的数据为空")
     
     # 确保所有列表长度一致
-    list_lengths = [len(v) for k, v in processed_data.items() if k != "threshold"]
+    list_lengths = [len(v) for k, v in processed_data.items() if k != "threshold" and k != "model"]
     if len(set(list_lengths)) > 1:
         raise ValueError("处理后的数据列表长度不一致")
     
@@ -258,10 +264,10 @@ def process_batch(batch_rows: pd.DataFrame) -> List[pd.Series]:
                         
                         # 保存未匹配数据到CSV
                         unmatch_df = pd.DataFrame(unmatched_data)
-                        mode = 'w' if not os.path.exists(CONFIG['UNMATCH_FILE']) else 'a'
-                        header = not os.path.exists(CONFIG['UNMATCH_FILE'])
-                        unmatch_df.to_csv(CONFIG['UNMATCH_FILE'], mode=mode, header=header, index=False)
-                        logging.info(f"已保存 {len(unmatched_data)} 条未匹配数据到文件 {CONFIG['UNMATCH_FILE']}")
+                        mode = 'w' if not os.path.exists(unmatch_file) else 'a'
+                        header = not os.path.exists(unmatch_file)
+                        unmatch_df.to_csv(unmatch_file, mode=mode, header=header, index=False)
+                        logging.info(f"已保存 {len(unmatched_data)} 条未匹配数据到文件 {unmatch_file}")
                     
                     return matching_results
                 else:
@@ -312,7 +318,9 @@ def process_artificial_data():
     try:
         # 读取数据
         logging.info("开始读取数据...")
-        df = pd.read_csv(CONFIG['INPUT_FILE'])
+        #当前路径
+
+        df = pd.read_csv(input_file)
 
         # 去除spl_room_name和s_room_name为空的数据
         df = df[df['spl_room_name'].notna() & df['s_room_name'].notna()]
@@ -356,9 +364,9 @@ def process_artificial_data():
                     if len(all_results) >= 1000 or end_idx == total_rows:
                         if all_results:
                             result_df = pd.DataFrame(all_results)
-                            mode = 'w' if not os.path.exists(CONFIG['OUTPUT_FILE']) else 'a'
-                            header = not os.path.exists(CONFIG['OUTPUT_FILE'])
-                            result_df.to_csv(CONFIG['OUTPUT_FILE'], mode=mode, header=header, index=False)
+                            mode = 'w' if not os.path.exists(output_file) else 'a'
+                            header = not os.path.exists(output_file)
+                            result_df.to_csv(output_file, mode=mode, header=header, index=False)
                             logging.info(f"已保存 {len(all_results)} 条结果到文件")
                             all_results = []
                     
