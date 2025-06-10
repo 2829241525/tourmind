@@ -83,7 +83,6 @@ else:
 DEFAULT_MODEL = os.environ.get('MODEL_TYPE', 'mdeberta')
 logger.info(f"使用默认模型类型: {DEFAULT_MODEL}")
 
-MAPPING_PATH = os.path.join(BASE_DIR, 'data/mapping1.xlsx')
 MAX_LENGTH = 80
 DEVICE = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 DEFAULT_THRESHOLD = 0.9
