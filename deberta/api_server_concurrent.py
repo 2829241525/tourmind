@@ -182,7 +182,7 @@ class BatchProcessor:
                     result = self.results[item_id]
                     del self.results[item_id]
                     return result
-            await asyncio.sleep(0.005)  # 短暂休眠以避免CPU过载
+            await asyncio.sleep(0.001)  # 短暂休眠以避免CPU过载
 
 # 辅助函数
 
@@ -416,7 +416,7 @@ class SimCSEPredictor:
         # 检查是否需要清理内存
         current_time = time.time()
         if current_time - self.last_cleanup_time > self.cleanup_interval:
-            self._cleanup_memory()
+            # self._cleanup_memory()
             self.last_cleanup_time = current_time
 
         for i in range(0, len(text1_list), batch_size):
@@ -452,30 +452,6 @@ class SimCSEPredictor:
                     torch.cuda.empty_cache()
 
         return torch.cat(logits_list, dim=0)
-
-    def _cleanup_memory(self):
-        """清理内存和缓存"""
-        try:
-            # 清理Torch的CUDA缓存
-            if torch.cuda.is_available():
-                before_allocated = torch.cuda.memory_allocated()
-                before_cached = torch.cuda.memory_reserved()
-
-                # 强制垃圾回收
-                import gc
-                gc.collect()
-
-                # 清空CUDA缓存
-                torch.cuda.empty_cache()
-
-                # 记录清理后的内存状态
-                after_allocated = torch.cuda.memory_allocated()
-                after_cached = torch.cuda.memory_reserved()
-
-                logger.info(f"内存清理完成 - 已用内存: {before_allocated/1024/1024:.2f}MB → {after_allocated/1024/1024:.2f}MB, "
-                            f"缓存: {before_cached/1024/1024:.2f}MB → {after_cached/1024/1024:.2f}MB")
-        except Exception as e:
-            logger.error(f"内存清理时出错: {str(e)}")
 
     def calculate_similarity(self, source_embeddings, normalize_to_probability=True):
         """计算相似度：将logits转换为概率值
@@ -994,16 +970,6 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
         request_id = time.strftime("%Y%m%d%H%M%S") + \
             str(int(time.time() * 1000) % 1000)
 
-        # 记录详细的输入数据
-        input_data = {
-            "spl_room_names": request.spl_room_names,
-            "spl_room_bed_names": request.spl_room_bed_names,
-            "s_room_names": request.s_room_names,
-            "s_room_bed_names": request.s_room_bed_names,
-            "threshold": request.threshold,
-            "model": request.model
-        }
-
         # 获取预测器实例
         predictor = get_predictor()
         cleaner = get_cleaner()
@@ -1034,37 +1000,24 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
                 model_type = DEFAULT_MODEL
         else:
             model_type = DEFAULT_MODEL
-            logger.info(f"请求ID: {request_id} - 请求未指定模型类型，使用默认模型: {model_type}")
+            # logger.info(f"请求ID: {request_id} - 请求未指定模型类型，使用默认模型: {model_type}")
 
         # 确定模型路径
-        model_path = MODEL_PATHS.get(model_type)
-
-        if model_path is None:
-            # 尝试构建可能的路径
-            possible_path = os.path.join(
-                BASE_DIR, f'checkpoints_{model_type}/best_model')
-            if os.path.exists(possible_path):
-                model_path = possible_path
-                logger.info(f"请求ID: {request_id} - 使用构建的模型路径: {model_path}")
-            else:
-                logger.error(f"请求ID: {request_id} - 不支持的模型类型: {model_type}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"不支持的模型类型: {model_type}。支持的类型有: {list(MODEL_PATHS.keys())}，或确保路径 {possible_path} 存在"
-                )
+        model_path = os.path.join(
+            BASE_DIR, f'checkpoints_{model_type}/best_model')
 
         # 如果模型类型与当前加载的不同，在后台加载新模型
         if predictor.model_path != model_path and not global_state.model_loading:
             # 记录要切换的模型
-            logger.info(
-                f"请求ID: {request_id} - 需要切换模型: {model_type} ({model_path})")
+            # logger.info(
+            #     f"请求ID: {request_id} - 需要切换模型: {model_type} ({model_path})")
 
             # 在后台加载新模型
             background_tasks.add_task(init_model, model_type)
 
             # 返回使用当前可用模型的信息
-            logger.info(
-                f"请求ID: {request_id} - 继续使用当前模型处理请求：{predictor.model_path}")
+            # logger.info(
+            #     f"请求ID: {request_id} - 继续使用当前模型处理请求：{predictor.model_path}")
 
         # 检查输入列表长度是否一致
         list_lengths = [
@@ -1107,207 +1060,29 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
             request.threshold
         )
 
-        # 记录处理结果
-        logger.info(
-            f"请求ID: {request_id} - 匹配完成，共处理 {len(source_texts)} 对文本，预测匹配 {sum(result['predictions'])} 对")
-
         return result
     except Exception as e:
+        # 清理当前请求所占据的显存
+        try:
+            import gc
+            # 强制垃圾回收
+            gc.collect()
+            # 清理CUDA缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                # 尝试释放更多显存
+                torch.cuda.synchronize()
+        except Exception as cleanup_e:
+            logger.warning(f"清理显存时出错: {str(cleanup_e)}")
+
         # 捕获所有其他未处理的异常
         logger.error(f"处理请求时出错: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"处理请求时出错: {str(e)}")
 
 
-@app.get("/health")
-async def health_check(token: str = None):
-    """健康检查接口"""
-    # 验证令牌
-    # verify_token(token)
-
-    status = "healthy"
-    model_info = {}
-
-    # 检查模型是否已加载
-    if global_state.predictor is None:
-        if global_state.model_loading:
-            status = "loading"
-            model_info["status"] = "模型正在加载中"
-            model_info["loading_started"] = global_state.model_loading
-        else:
-            status = "warning"
-            model_info["warning"] = "模型尚未加载"
-            model_info["last_error"] = global_state.last_error
-            model_info["init_attempts"] = global_state.init_attempts
-    else:
-        model_info["model_path"] = global_state.predictor.model_path
-        model_info["loss_type"] = global_state.predictor.loss_type
-        model_info["device"] = str(global_state.predictor.device)
-
-    # 检查清洗器是否已加载
-    cleaner_info = {}
-    if global_state.cleaner is None:
-        status = "warning" if status != "error" and status != "loading" else status
-        cleaner_info["warning"] = "文本清洗器尚未加载"
-    else:
-        cleaner_info["mapping_file"] = str(global_state.cleaner.mapping_file)
-        cleaner_info["rule_count"] = sum(
-            len(rules) for rules in global_state.cleaner.room_rules.values())
-
-    return {
-        "status": status,
-        "model": model_info,
-        "cleaner": cleaner_info,
-        "available_models": list(MODEL_PATHS.keys())
-    }
-
-
-@app.post("/reload")
-async def reload_model(model_type: str = DEFAULT_MODEL, token: str = None):
-    """
-    重新加载模型
-
-    - model_type: 要加载的模型类型
-    - token: API令牌 (必填)
-    """
-    # 验证令牌
-    verify_token(token)
-
-    request_id = time.strftime("%Y%m%d%H%M%S") + \
-        str(int(time.time() * 1000) % 1000)
-
-    # 处理模型类型参数
-    if model_type:
-        model_type = model_type.strip()
-        if model_type:
-            model_type = model_type.lower()
-            logger.info(f"请求ID: {request_id} - 重新加载指定的模型类型: {model_type}")
-        else:
-            model_type = DEFAULT_MODEL
-            logger.info(f"请求ID: {request_id} - 模型类型为空，使用默认模型: {model_type}")
-    else:
-        model_type = DEFAULT_MODEL
-        logger.info(f"请求ID: {request_id} - 未指定模型类型，使用默认模型: {model_type}")
-
-    # 检查模型路径是否有效
-    model_path = MODEL_PATHS.get(model_type)
-
-    if model_path is None:
-        # 尝试构建可能的路径
-        possible_path = os.path.join(
-            BASE_DIR, f'checkpoints_{model_type}/best_model')
-        if not os.path.exists(possible_path):
-            logger.error(f"请求ID: {request_id} - 不支持的模型类型: {model_type}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的模型类型: {model_type}。支持的类型有: {list(MODEL_PATHS.keys())}，或确保路径 {possible_path} 存在"
-            )
-
-    if global_state.model_loading:
-        logger.warning(f"请求ID: {request_id} - 模型正在加载中，请求被拒绝")
-        return {"status": "loading", "message": "模型正在加载中，请稍后再试"}
-
-    # 启动模型重新加载
-    init_model(model_type)
-    logger.info(f"请求ID: {request_id} - 已开始重新加载模型: {model_type}")
-    return {"status": "started", "message": f"已开始重新加载模型: {model_type}"}
-
-
-@app.get("/config")
-async def get_config(token: str = None):
-    """获取服务配置信息"""
-    # 验证令牌
-    verify_token(token)
-
-    config = {
-        "base_dir": BASE_DIR,
-        "model_paths": MODEL_PATHS,
-        "default_model": DEFAULT_MODEL,
-        "mapping_path": MAPPING_PATH,
-        "max_length": MAX_LENGTH,
-        "device": DEVICE,
-        "default_threshold": DEFAULT_THRESHOLD,
-        "log_file": LOG_FILE
-    }
-    return config
-
-
-@app.get("/stats")
-async def get_stats(token: str = None):
-    """获取性能统计信息"""
-    # 验证令牌
-    verify_token(token)
-
-    stats = {
-        "cache": {
-            "hits": 0,
-            "misses": 0,
-            "hit_rate": 0,
-            "cache_size": 0
-        },
-        "batch_processing": {
-            "queue_size": 0
-        },
-        "model": {
-            "type": None,
-            "device": None,
-            "use_fp16": False
-        },
-        "performance": {
-            "avg_request_time_ms": 0,
-            "total_requests": 0,
-            "memory_usage_mb": {
-                "allocated": 0,
-                "reserved": 0
-            }
-        }
-    }
-
-    # 获取预测器实例
-    predictor = get_predictor()
-    if predictor:
-        # 缓存统计
-        cache_hits = predictor.cache_hits
-        cache_misses = predictor.cache_misses
-        total_requests = cache_hits + cache_misses
-        hit_rate = cache_hits / total_requests if total_requests > 0 else 0
-
-        stats["cache"]["hits"] = cache_hits
-        stats["cache"]["misses"] = cache_misses
-        stats["cache"]["hit_rate"] = hit_rate
-        stats["cache"]["cache_size"] = len(predictor.result_cache)
-
-        # 批处理统计
-        if hasattr(predictor, 'batch_processor'):
-            stats["batch_processing"]["queue_size"] = predictor.batch_processor.queue.qsize()
-
-        # 模型信息
-        stats["model"]["type"] = predictor.loss_type
-        stats["model"]["device"] = str(predictor.device)
-        stats["model"]["use_fp16"] = predictor.use_fp16
-
-        # 性能统计
-        if hasattr(predictor, 'total_processing_time') and hasattr(predictor, 'total_requests'):
-            if predictor.total_requests > 0:
-                avg_time = (predictor.total_processing_time /
-                            predictor.total_requests) * 1000  # ms
-                stats["performance"]["avg_request_time_ms"] = round(
-                    avg_time, 2)
-            stats["performance"]["total_requests"] = predictor.total_requests
-
-        # 内存使用统计
-        if torch.cuda.is_available():
-            stats["performance"]["memory_usage_mb"]["allocated"] = round(
-                torch.cuda.memory_allocated() / (1024 * 1024), 2)
-            stats["performance"]["memory_usage_mb"]["reserved"] = round(
-                torch.cuda.memory_reserved() / (1024 * 1024), 2)
-
-    return stats
-
 if __name__ == "__main__":
     # 获取可用的worker数量
-    import multiprocessing
-    # workers = min(multiprocessing.cpu_count() * 2 + 1, 16)
-    workers = 1
+    workers = 8
 
     # 启动配置，使用更多的worker以提高并发处理能力
     # 修改启动方式，使用模块导入字符串而不是直接传递应用实例
@@ -1316,7 +1091,8 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=13009,
         workers=workers,  # 使用多个worker进程
-        log_level="info",
+        log_level="warning",  # 改为warning级别，减少info日志输出
+        access_log=False,  # 关闭HTTP访问日志
         limit_concurrency=100,  # 限制并发连接数
         timeout_keep_alive=65,  # 保持连接超时时间
     )
