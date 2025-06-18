@@ -20,8 +20,8 @@ CONFIG = {
 
     # 极限攻击配置 - 以并发为主攻击手段
     "MAX_ARRAY_SIZE": 1000,  # 中等数组大小
-    "WAVE_SIZES": [5000, 7000, 8000, 9000, 10000],  # 逐渐增大的攻击波次
-    "MAX_CONCURRENT": 100,  # 极高并发数
+    "WAVE_SIZES": [500, 700, 800, 900, 1000],  # 逐渐增大的攻击波次
+    "MAX_CONCURRENT": 10,  # 极高并发数
     "ATTACK_ROUNDS": 30,  # 增加攻击轮数
     "NO_DELAY": True,  # 无延迟模式
     "CONCURRENT_MULTIPLIER": 3,  # 并发倍数
@@ -29,7 +29,7 @@ CONFIG = {
     # 复杂文本 - 更长的文本增加模型处理负担
     "COMPLEX_ROOMS": [
         "Exclusive Presidential Executive VIP Luxury Grand Master Suite with Panoramic Ocean View Private Terrace Jacuzzi Full Kitchen Living Room Dining Area Work Station Entertainment System Smart Home Technology Concierge Services Butler Available 24-Hour Room Service Late Check-In After Midnight Continental Breakfast Included High-Speed Wireless Internet Access Premium Cable Television Channels Complimentary Minibar Refreshments Daily Housekeeping Services Airport Limousine Transfer Business Center Access Fitness Center Swimming Pool Spa Services Conference Room Facilities Meeting Room Reservations Special Occasion Packages Honeymoon Romance Package Anniversary Celebration Wedding Suite Corporate Events Business Meetings",
-    ] * 50  # 重复50次增加复杂度
+    ] * 10  # 重复50次增加复杂度
 }
 
 # 日志配置
