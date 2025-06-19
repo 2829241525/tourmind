@@ -20,8 +20,8 @@ CONFIG = {
 
     # 极限攻击配置 - 以并发为主攻击手段
     "MAX_ARRAY_SIZE": 1000,  # 中等数组大小
-    "WAVE_SIZES": [500, 700, 800, 900, 1000],  # 逐渐增大的攻击波次
-    "MAX_CONCURRENT": 10,  # 极高并发数
+    "WAVE_SIZES": [ 1500, 2000, 3000],  # 逐渐增大的攻击波次
+    "MAX_CONCURRENT": 16,  # 极高并发数
     "ATTACK_ROUNDS": 30,  # 增加攻击轮数
     "NO_DELAY": True,  # 无延迟模式
     "CONCURRENT_MULTIPLIER": 3,  # 并发倍数

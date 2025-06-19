@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SimCSE模型推理HTTP服务
+SimCSE模型推理HTTP服务 - 优化版本
 """
 
 import os
@@ -20,12 +20,14 @@ import time
 import logging
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
-import hashlib  # 添加hashlib库导入
-import asyncio  # 添加asyncio库导入
+import hashlib
+import asyncio
 import queue
 import threading
 import numpy as np
-from contextlib import asynccontextmanager  # 导入 asynccontextmanager 用于 lifespan
+from contextlib import asynccontextmanager
+import gc
+import weakref
 
 # 配置区域
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,14 +36,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
 
 # 配置日志
+APP_ENV = os.environ.get("APP_ENV", "development").lower()
+LOG_LEVEL = "INFO" if APP_ENV == "production" else "DEBUG"
+numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
+
 # 定义日志轮转配置
 LOG_FILE = os.path.join(BASE_DIR, "logs/api_server.log")
 MAX_LOG_SIZE = 1024 * 1024 * 1024  # 1GB
 BACKUP_COUNT = 5  # 保留5个备份文件
 
+# 为不同环境设置不同的日志格式
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+if APP_ENV == "development":
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(pathname)s:%(lineno)d] - %(message)s'
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=numeric_level,
+    format=log_format,
     handlers=[
         RotatingFileHandler(
             LOG_FILE,
@@ -52,9 +63,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("api_server")
+logger.info(f"当前环境: {APP_ENV}, 日志级别: {LOG_LEVEL}")
 
 # API令牌验证配置
-API_TOKEN_HASH = "60df8f7a480258940917f0d04e74338bf76f53f449e227c771663a28bf43bd1c"  # 将令牌加密存储
+API_TOKEN_HASH = "60df8f7a480258940917f0d04e74338bf76f53f449e227c771663a28bf43bd1c"
 
 # 文本处理配置
 UNKNOWN_TEXT = "[unknown]"
@@ -64,17 +76,16 @@ BED_PREFIX = "[bed]"
 
 # 模型路径映射
 MODEL_PATHS = {
-    'cross_entropy': os.path.join(BASE_DIR, 'checkpoints_cross_entropy_result1_nosplct/best_model')
+    'cross_entropy': os.path.join(BASE_DIR, 'checkpoints_cloud_result_nosplct/best_model')
 }
 DEFAULT_MODEL = 'cross_entropy'
 
 MAPPING_PATH = os.path.join(BASE_DIR, 'data/mapping.xlsx')
 MAX_LENGTH = 80
-DEVICE = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 DEFAULT_THRESHOLD = 0.9
 
-# 线程池配置
-# 用于处理模型推理的线程池
+# 线程池配置 - 使用线程池而非多进程
 MAX_WORKERS = 10  # 并发推理的最大线程数
 inference_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
@@ -82,6 +93,32 @@ inference_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 MAX_BATCH_SIZE = 1024  # 最大批处理大小
 BATCH_TIMEOUT = 0.01  # 批处理超时时间（秒）
 MIN_BATCH_SIZE = 32  # 最小批处理大小
+
+# 模型加载锁和信号量
+model_lock = threading.Lock()
+model_loading_lock = asyncio.Lock()  # 异步锁，防止并发加载
+
+# 结果跟踪类
+
+
+class Result:
+    def __init__(self, timeout=10.0):
+        self._event = asyncio.Event()
+        self._result = None
+        self._timeout = timeout
+
+    async def get(self):
+        try:
+            await asyncio.wait_for(self._event.wait(), timeout=self._timeout)
+            return self._result
+        except asyncio.TimeoutError:
+            return {"error": "Result retrieval timed out"}
+
+    def set(self, value):
+        self._result = value
+        self._event.set()
+
+# 改进的批处理器类
 
 
 class BatchProcessor:
@@ -98,62 +135,81 @@ class BatchProcessor:
         self.max_batch_size = max_batch_size
         self.timeout = timeout
         self.queue = queue.Queue()
-        self.results = {}
-        self.lock = threading.Lock()
-        self.result_id = 0
+        self._stop_event = threading.Event()
+        self._stopped = False
         self.worker_thread = threading.Thread(
             target=self._worker_loop, daemon=True)
         self.worker_thread.start()
         logger.info(f"批处理器已初始化，最大批处理大小: {max_batch_size}, 超时: {timeout}秒")
 
+    def stop(self):
+        """停止批处理器"""
+        if not self._stopped:
+            self._stopped = True
+            self._stop_event.set()
+
+            # 清空队列，通知所有等待的请求
+            while not self.queue.empty():
+                try:
+                    future, _ = self.queue.get_nowait()
+                    future.set({"error": "Batch processor is stopping"})
+                except queue.Empty:
+                    break
+
+            # 等待工作线程结束
+            if self.worker_thread.is_alive():
+                self.worker_thread.join(timeout=2.0)
+
+            logger.info("批处理器已停止")
+
     def _worker_loop(self):
         """工作线程循环，处理批量数据"""
-        while True:
-            # 收集批量数据
+        while not self._stop_event.is_set():
             batch_items = []
-            batch_ids = []
+            batch_futures = []
 
             # 等待第一个项目
             try:
-                first_id, first_item = self.queue.get(block=True)
+                first_future, first_item = self.queue.get(timeout=0.1)
+                if self._stop_event.is_set():
+                    first_future.set({"error": "Batch processor is stopping"})
+                    break
                 batch_items.append(first_item)
-                batch_ids.append(first_id)
+                batch_futures.append(first_future)
                 self.queue.task_done()
             except queue.Empty:
                 continue
 
             # 尝试获取更多项目，直到达到最大批量大小或超时
-            try:
-                start_time = time.time()
-                while len(batch_items) < self.max_batch_size and time.time() - start_time < self.timeout:
-                    try:
-                        item_id, item = self.queue.get(
-                            block=True, timeout=self.timeout)
-                        batch_items.append(item)
-                        batch_ids.append(item_id)
-                        self.queue.task_done()
-                    except queue.Empty:
-                        break
-            except Exception as e:
-                logger.error(f"批处理器收集项目时出错: {str(e)}")
+            start_time = time.time()
+            while (len(batch_items) < self.max_batch_size and
+                   time.time() - start_time < self.timeout and
+                   not self._stop_event.is_set()):
+                try:
+                    future, item = self.queue.get(block=False)
+                    batch_items.append(item)
+                    batch_futures.append(future)
+                    self.queue.task_done()
+                except queue.Empty:
+                    break
 
             # 处理批量数据
-            if batch_items:
+            if batch_items and not self._stop_event.is_set():
                 try:
                     batch_size = len(batch_items)
                     logger.debug(f"处理批量数据，大小: {batch_size}")
                     batch_results = self.process_fn(batch_items)
 
-                    # 保存结果
-                    with self.lock:
-                        for idx, batch_id in enumerate(batch_ids):
-                            self.results[batch_id] = batch_results[idx]
+                    # 设置结果
+                    for future, result in zip(batch_futures, batch_results):
+                        future.set(result)
+
                 except Exception as e:
                     logger.error(f"处理批量数据时出错: {str(e)}")
                     # 在错误情况下，为所有项目设置错误结果
-                    with self.lock:
-                        for batch_id in batch_ids:
-                            self.results[batch_id] = {"error": str(e)}
+                    error_result = {"error": str(e)}
+                    for future in batch_futures:
+                        future.set(error_result)
 
     async def process(self, item):
         """
@@ -165,35 +221,56 @@ class BatchProcessor:
         Returns:
             处理结果
         """
-        # 获取唯一ID
-        with self.lock:
-            item_id = self.result_id
-            self.result_id += 1
+        if self._stopped:
+            return {"error": "Batch processor is stopped"}
 
-        # 将项目放入队列
-        self.queue.put((item_id, item))
+        future = Result()
+        self.queue.put((future, item))
+        return await future.get()
 
-        # 等待结果
-        while True:
-            with self.lock:
-                if item_id in self.results:
-                    result = self.results[item_id]
-                    del self.results[item_id]
-                    return result
-            await asyncio.sleep(0.001)  # 短暂休眠以避免CPU过载
+# 全局状态管理类
+
+
+class GlobalState:
+    def __init__(self):
+        self.predictor = None
+        self.cleaner = None
+        self.model_loading = False
+        self.init_attempts = 0
+        self.last_error = None
+        self.model_path = None
+        self.model_name = None
+        self.pending_model_change = None  # 记录待加载的模型
+        self._predictor_ref = None  # 使用弱引用
+
+    def set_predictor(self, predictor):
+        """设置预测器，使用弱引用"""
+        if predictor is not None:
+            self._predictor_ref = weakref.ref(predictor)
+            self.predictor = predictor
+        else:
+            self._predictor_ref = None
+            self.predictor = None
+
+    def get_predictor(self):
+        """获取预测器，检查弱引用是否有效"""
+        if self._predictor_ref is not None:
+            predictor = self._predictor_ref()
+            if predictor is None:
+                # 弱引用已失效
+                self.predictor = None
+            return predictor
+        return None
+
+
+# 初始化全局状态
+global_state = GlobalState()
 
 # 辅助函数
 
 
 def verify_token(token: str):
-    """验证令牌是否有效
-
-    Args:
-        token: 要验证的令牌
-
-    Raises:
-        HTTPException: 如果令牌无效则抛出401错误
-    """
+    """验证令牌是否有效"""
     if not token:
         logger.warning("API请求缺少令牌")
         raise HTTPException(
@@ -214,77 +291,7 @@ def verify_token(token: str):
 
     return True
 
-
-# 创建一个锁，用于控制模型加载
-model_lock = threading.Lock()
-
-# 创建全局状态对象，替代原来的全局变量
-
-
-class GlobalState:
-    def __init__(self):
-        self.predictor = None
-        self.cleaner = None
-        self.model_loading = False
-        self.init_attempts = 0
-        self.last_error = None
-        self.model_path = None
-
-
-# 初始化全局状态
-global_state = GlobalState()
-
-# 定义生命周期管理器，替代原有的 on_event
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # 启动时执行的代码，相当于原来的 startup_event
-    logger.info(f"API服务启动")
-    logger.info(f"当前工作目录: {os.getcwd()}")
-    logger.info(f"BASE_DIR: {BASE_DIR}")
-    logger.info(
-        f"日志文件: {LOG_FILE}，最大大小: {MAX_LOG_SIZE/1024/1024/1024:.1f}GB，保留备份数: {BACKUP_COUNT}")
-
-    # 初始化模型
-    logger.info("开始初始化模型...")
-    init_model()
-
-    # 初始化清洗器
-    logger.info("开始初始化文本清洗器...")
-    init_cleaner()
-
-    yield  # 这里是应用运行的部分
-
-    # 关闭时执行的代码，相当于原来的 shutdown_event
-    logger.info("API服务关闭")
-
-# 创建FastAPI应用
-app = FastAPI(
-    title="房间匹配服务",
-    description="基于SimCSE的房间文本匹配服务",
-    version="1.0.0",
-    lifespan=lifespan  # 使用新的生命周期管理器
-)
-
-# 请求模型
-
-
-class MatchRequest(BaseModel):
-    spl_room_names: List[str]
-    spl_room_bed_names: List[str]
-    s_room_names: List[str]
-    s_room_bed_names: List[str]
-    threshold: float = DEFAULT_THRESHOLD
-    model: str = DEFAULT_MODEL
-    token: str = None  # 添加token字段
-
-# 响应模型
-
-
-class MatchResponse(BaseModel):
-    similarities: List[float]
-    predictions: List[int]
+# 改进的SimCSEPredictor类
 
 
 class SimCSEPredictor:
@@ -322,14 +329,18 @@ class SimCSEPredictor:
 
         # 加载模型并转移到设备
         try:
+            # 清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
             # 使用半精度加载模型节省内存
             if self.use_fp16 and torch.cuda.is_available():
                 logger.info("使用FP16加载模型以节省显存")
-                with torch.cuda.amp.autocast():
-                    self.model = AutoModelForSequenceClassification.from_pretrained(
-                        model_path,
-                        torch_dtype=torch.float16
-                    ).to(self.device)
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16
+                ).to(self.device)
             else:
                 logger.info("使用FP32加载模型")
                 self.model = AutoModelForSequenceClassification.from_pretrained(
@@ -355,6 +366,11 @@ class SimCSEPredictor:
             self.model.gradient_checkpointing_enable()
             logger.info("已启用梯度检查点以节省显存")
 
+        # 设置模型为评估模式并禁用梯度计算
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
         # 初始化批处理器
         self.batch_processor = BatchProcessor(
             process_fn=self._batch_process_text_pairs,
@@ -363,188 +379,135 @@ class SimCSEPredictor:
         )
         logger.info(f"初始化批处理器，最大批大小: {MAX_BATCH_SIZE}，超时: {BATCH_TIMEOUT}秒")
 
-        # 结果缓存，用于频繁使用的相同输入（避免重复计算）
-        self.result_cache = {}
-        self.cache_hits = 0
-        self.cache_misses = 0
-        self.max_cache_size = 10000  # 最大缓存条目数
-
         # 统计请求处理时间
         self.total_processing_time = 0
         self.total_requests = 0
 
-        # 定期清理内存
-        self.last_cleanup_time = time.time()
-        self.cleanup_interval = 300  # 5分钟清理一次内存
+    def __del__(self):
+        """析构函数，确保资源被释放"""
+        self.cleanup()
 
-    def encode_batch(self, texts, batch_size=256):
-        """编码文本 (适用于cross_entropy模式)"""
-        embeddings = []
+    def cleanup(self):
+        """清理所有资源"""
+        try:
+            # 停止批处理器
+            if hasattr(self, 'batch_processor') and self.batch_processor is not None:
+                self.batch_processor.stop()
+                self.batch_processor = None
 
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i + batch_size]
-            encoded = self.tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=MAX_LENGTH,
-                return_tensors='pt'
-            )
+            # 删除模型
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+                self.model = None
 
-            encoded = {k: v.to(self.device) for k, v in encoded.items()}
+            # 删除分词器
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+                self.tokenizer = None
 
-            with torch.no_grad():
-                with autocast(enabled=self.use_fp16):
-                    outputs = self.model(**encoded)
-                    # 获取正类的logits得分
-                    batch_embeddings = outputs.logits[:, 1]
+            # 清理GPU内存
+            self.cleanup_memory()
 
-                    # 确保返回的是float类型，避免后续操作出错
-                    if batch_embeddings.dtype == torch.float16:
-                        batch_embeddings = batch_embeddings.float()
-
-                    embeddings.append(batch_embeddings.cpu())
-
-        return torch.cat(embeddings, dim=0)
+        except Exception as e:
+            logger.error(f"清理预测器资源时出错: {str(e)}")
 
     def encode_text_pair(self, text1_list, text2_list, batch_size=256):
-        """批量编码文本对，用于cross_entropy模式"""
-        logits_list = []
+        """批量编码文本对，改进内存管理"""
+        if not hasattr(self, 'tokenizer') or self.tokenizer is None:
+            raise RuntimeError(
+                "Tokenizer not available. Model may be in an invalid state.")
+        if not hasattr(self, 'model') or self.model is None:
+            raise RuntimeError(
+                "Model not available. Model may be in an invalid state.")
 
-        # 检查是否需要清理内存
-        current_time = time.time()
-        if current_time - self.last_cleanup_time > self.cleanup_interval:
-            self.last_cleanup_time = current_time
+        total_len = len(text1_list)
 
-        for i in range(0, len(text1_list), batch_size):
+        # 使用列表收集结果，避免大内存预分配
+        all_logits_list = []
+
+        for i in range(0, total_len, batch_size):
             batch_text1 = text1_list[i:i + batch_size]
             batch_text2 = text2_list[i:i + batch_size]
 
-            # 对于分类器模型，使用文本对输入
-            encoded = self.tokenizer(
-                batch_text1,
-                text_pair=batch_text2,
-                padding=True,
-                truncation=True,
-                max_length=MAX_LENGTH,
-                return_tensors='pt'
-            )
+            # 确保在正确的设备上处理
+            with torch.cuda.device(self.device if torch.cuda.is_available() else 'cpu'):
+                # 对文本进行编码
+                encoded = self.tokenizer(
+                    batch_text1,
+                    text_pair=batch_text2,
+                    padding=True,
+                    truncation=True,
+                    max_length=MAX_LENGTH,
+                    return_tensors='pt'
+                )
 
-            encoded = {k: v.to(self.device) for k, v in encoded.items()}
+                # 将数据移到设备
+                encoded = {k: v.to(self.device) for k, v in encoded.items()}
 
-            with torch.no_grad():
-                with autocast(enabled=self.use_fp16):
-                    outputs = self.model(**encoded)
-                    # 获取正类的logits得分
-                    batch_logits = outputs.logits[:, 1]
-                    # 确保返回的是float类型，避免后续sigmoid操作出错
-                    if batch_logits.dtype == torch.float16:
-                        batch_logits = batch_logits.float()
-                    logits_list.append(batch_logits.cpu())
+                with torch.no_grad():
+                    with autocast(enabled=self.use_fp16):
+                        outputs = self.model(**encoded)
+                        # 获取正类的logits得分
+                        batch_logits = outputs.logits[:, 1]
 
-                # 清理当前批次的GPU内存
+                        # 立即转换到CPU并转为float32
+                        batch_logits_cpu = batch_logits.float().cpu()
+                        all_logits_list.append(batch_logits_cpu)
+
+                        # 显式删除GPU张量
+                        del outputs
+                        del batch_logits
+
+                # 立即清理输入张量
+                for v in encoded.values():
+                    del v
                 del encoded
-                del outputs
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
-        return torch.cat(logits_list, dim=0)
+                # 每处理5个批次就清理一次GPU缓存
+                if i > 0 and (i // batch_size) % 5 == 0:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        # 合并结果
+        all_logits = torch.cat(all_logits_list, dim=0)
+
+        # 清理临时列表
+        del all_logits_list
+
+        return all_logits
+
+    def cleanup_memory(self):
+        """清理GPU内存和缓存"""
+        try:
+            # 强制垃圾回收
+            gc.collect()
+
+            # 清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                # 记录当前GPU使用情况
+                allocated = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                logger.info(
+                    f"手动清理后GPU内存 - 已分配: {allocated:.2f}MB, 已预留: {reserved:.2f}MB")
+        except Exception as e:
+            logger.error(f"清理内存时出错: {str(e)}")
 
     def calculate_similarity(self, source_embeddings, normalize_to_probability=True):
-        """计算相似度：将logits转换为概率值
-
-        Args:
-            source_embeddings: 源文本logits
-            normalize_to_probability: 是否将结果归一化为0-1之间的概率值
-        """
-        # 交叉熵模式：直接使用logits作为相似度分数
+        """计算相似度：将logits转换为概率值"""
         similarities = source_embeddings
 
-        # 使用sigmoid函数将logits转换为0-1之间的概率值
         if normalize_to_probability:
-            # 确保张量为float类型，解决"sigmoid_cpu" not implemented for 'Half'的问题
             if similarities.dtype == torch.float16:
                 similarities = similarities.float()
             similarities = torch.sigmoid(similarities)
 
         return similarities
 
-    def predict(self, source_texts: List[str], target_texts: List[str], threshold: float = DEFAULT_THRESHOLD):
-        """预测文本对的匹配情况"""
-        if len(source_texts) != len(target_texts):
-            raise ValueError("源文本和目标文本数量必须相同")
-
-        # 检查缓存
-        cache_hits = 0
-        cache_keys = []
-        result_similarities = []
-        uncached_indices = []
-        uncached_sources = []
-        uncached_targets = []
-
-        for i, (source, target) in enumerate(zip(source_texts, target_texts)):
-            # 创建缓存键
-            cache_key = hashlib.md5(
-                f"{source}:::{target}:::{threshold}".encode()).hexdigest()
-            cache_keys.append(cache_key)
-
-            # 尝试从缓存获取结果
-            if cache_key in self.result_cache:
-                result_similarities.append(self.result_cache[cache_key])
-                cache_hits += 1
-            else:
-                # 未缓存的需要计算
-                result_similarities.append(None)  # 占位符
-                uncached_indices.append(i)
-                uncached_sources.append(source)
-                uncached_targets.append(target)
-
-        # 如果有未缓存的结果，计算它们
-        if uncached_sources:
-            logits = self.encode_text_pair(uncached_sources, uncached_targets)
-            uncached_similarities = self.calculate_similarity(
-                logits).cpu().numpy().tolist()
-
-            # 更新结果和缓存
-            for i, sim, idx in zip(range(len(uncached_indices)), uncached_similarities, uncached_indices):
-                result_similarities[idx] = sim
-
-                # 更新缓存
-                self.result_cache[cache_keys[idx]] = sim
-
-        # 更新缓存统计
-        self.cache_hits += cache_hits
-        self.cache_misses += len(uncached_sources)
-
-        # 如果缓存太大，移除最旧的条目
-        if len(self.result_cache) > self.max_cache_size:
-            # 移除10%的缓存条目
-            items_to_remove = int(self.max_cache_size * 0.1)
-            keys_to_remove = list(self.result_cache.keys())[:items_to_remove]
-            for key in keys_to_remove:
-                del self.result_cache[key]
-            logger.info(f"缓存清理：移除了 {len(keys_to_remove)} 条缓存项")
-
-        # 根据阈值进行预测
-        predictions = [1.0 if sim >
-                       threshold else 0.0 for sim in result_similarities]
-
-        return {
-            'similarities': result_similarities,
-            'predictions': predictions,
-            'threshold': threshold
-        }
-
     def _batch_process_text_pairs(self, items):
-        """
-        批量处理文本对
-
-        Args:
-            items: 批量项目列表，每个项目是(源文本, 目标文本, 阈值)的元组
-
-        Returns:
-            处理结果列表
-        """
+        """批量处理文本对"""
         source_texts = [item[0] for item in items]
         target_texts = [item[1] for item in items]
         thresholds = [item[2] for item in items]
@@ -568,7 +531,7 @@ class SimCSEPredictor:
         return results
 
     async def predict_async(self, source_texts: List[str], target_texts: List[str], threshold: float = DEFAULT_THRESHOLD):
-        """异步预测文本对的匹配情况，使用线程池避免阻塞事件循环"""
+        """异步预测文本对的匹配情况"""
         if len(source_texts) != len(target_texts):
             raise ValueError("源文本和目标文本数量必须相同")
 
@@ -586,7 +549,6 @@ class SimCSEPredictor:
             # 对于小批量，使用批处理队列
             results = []
             for source, target in zip(source_texts, target_texts):
-                # 为每个文本对创建任务并提交到批处理队列
                 result = await self.batch_processor.process((source, target, threshold))
                 results.append(result)
 
@@ -609,9 +571,10 @@ class SimCSEPredictor:
         start_time = time.time()
 
         # 执行推理
-        logits = self.encode_text_pair(source_texts, target_texts)
-        similarities = self.calculate_similarity(logits)
-        predictions = (similarities > threshold).float()
+        with torch.no_grad():
+            logits = self.encode_text_pair(source_texts, target_texts)
+            similarities = self.calculate_similarity(logits)
+            predictions = (similarities > threshold).float()
 
         # 记录处理时间
         processing_time = time.time() - start_time
@@ -623,11 +586,25 @@ class SimCSEPredictor:
             logger.info(f"批量推理完成 - 处理了 {len(source_texts)} 对文本，耗时: {processing_time:.3f}秒，"
                         f"平均每对: {processing_time/len(source_texts)*1000:.2f}毫秒")
 
-        return {
+        # 转换结果并清理GPU内存
+        result = {
             'similarities': similarities.cpu().numpy().tolist(),
             'predictions': predictions.cpu().numpy().tolist(),
             'threshold': threshold
         }
+
+        # 显式删除GPU张量
+        del logits
+        del similarities
+        del predictions
+
+        # 清理GPU缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return result
+
+# DataCleaner类保持不变
 
 
 class DataCleaner:
@@ -636,19 +613,16 @@ class DataCleaner:
         self.room_rules, self.bed_rules = self._load_replacement_rules()
 
     def _load_replacement_rules(self) -> Tuple[dict, List[Tuple[str, str, int]]]:
-        # 定义映射替换模式
         xlsx = pd.ExcelFile(self.mapping_file)
         sheet_names = xlsx.sheet_names
         room_rules = {}
         bed_rules = []
 
-        # 按照sheet顺序构建字典
         for sheet_idx, sheet_name in enumerate(sheet_names, 1):
             sheet_data = pd.read_excel(xlsx, sheet_name=sheet_name)
             if not {'key', 'value'}.issubset(sheet_data.columns):
                 continue
 
-            # 处理每一行数据
             current_sheet_rules = []
             for _, row in sheet_data.iterrows():
                 key = str(row['key']).strip().lower()
@@ -658,16 +632,13 @@ class DataCleaner:
                          for value in values if value]
                 current_sheet_rules.extend(rules)
 
-            # 按原文本长度降序排序当前sheet的规则
             current_sheet_rules = sorted(
                 current_sheet_rules, key=lambda x: x[2], reverse=True)
 
-            # 如果是bed工作表，单独处理床型
             if sheet_name.lower() == 'bed':
                 bed_rules = current_sheet_rules
                 room_rules[sheet_name.lower()] = current_sheet_rules
             else:
-                # 其他工作表作为房型规则，使用sheet_name作为key
                 room_rules[sheet_name.lower()] = current_sheet_rules
 
         return room_rules, bed_rules
@@ -677,22 +648,17 @@ class DataCleaner:
             return text
 
         text_lower = str(text).lower()
-        # 遍历每个sheet的规则
         for sheet_name, rules in self.room_rules.items():
-            # 遍历当前sheet中的所有规则
             for value, key, _ in rules:
                 pattern = re.compile(
-                    rf'(?:^|(?<=[^a-zA-Z0-9-]))'  # 开始边界：确保前面是非字母数字和横杠
-                    rf'{re.escape(value)}'  # 需要匹配的文本
-                    rf'(?:$|(?=[^a-zA-Z0-9-]))',  # 结束边界：确保后面是非字母数字和横杠
+                    rf'(?:^|(?<=[^a-zA-Z0-9-]))'
+                    rf'{re.escape(value)}'
+                    rf'(?:$|(?=[^a-zA-Z0-9-]))',
                     re.IGNORECASE
                 )
-                if pattern.search(text_lower):  # 如果找到匹配
+                if pattern.search(text_lower):
                     text_lower = pattern.sub(key, text_lower)
-                    break  # 找到匹配后就停止当前sheet的搜索
-
-            # 如果在当前sheet中找到了匹配，继续处理下一个sheet的规则
-            # 这样可以让不同类型的规则（不同sheet）都能应用到文本上
+                    break
 
         return text_lower
 
@@ -703,7 +669,6 @@ class DataCleaner:
             return text
 
         text_lower = str(text).lower()
-        # 只使用bed工作表的规则
         for value, key, _ in self.bed_rules:
             pattern = re.compile(
                 rf'(?:^|(?<=[^a-zA-Z0-9-]))'
@@ -715,45 +680,91 @@ class DataCleaner:
 
         return text_lower
 
-
-def get_predictor():
-    """获取当前预测器实例，如果不存在则尝试初始化"""
-    if global_state.predictor is None and not global_state.model_loading:
-        # 如果没有正在加载模型，且模型尚未初始化，则尝试初始化默认模型
-        logger.info(f"预测器未初始化，尝试加载默认模型: {DEFAULT_MODEL}")
-        init_model(DEFAULT_MODEL)
-    return global_state.predictor
+# 改进的模型加载函数
 
 
-def get_cleaner():
-    """获取当前清洗器实例，如果不存在则尝试初始化"""
-    if global_state.cleaner is None and not global_state.model_loading:
-        init_cleaner()
-    return global_state.cleaner
-
-
-def load_predictor_in_background(model_path: str):
-    """在后台线程中加载预测器"""
+def load_predictor_in_background(model_path: str, model_name: str):
+    """在后台线程中加载预测器，改进内存管理"""
     global global_state
 
     try:
         with model_lock:
+            # 检查是否已经在加载相同的模型
+            if (global_state.model_loading and
+                    global_state.pending_model_change == model_name):
+                logger.info(f"模型 {model_name} 已在加载中，跳过重复加载")
+                return
+
+            # 如果当前模型就是要加载的模型，跳过
+            if global_state.model_name == model_name and global_state.predictor is not None:
+                logger.info(f"模型 {model_name} 已加载，跳过重复加载")
+                return
+
             global_state.model_loading = True
+            global_state.pending_model_change = model_name
             logger.info(f"开始在后台加载模型：{model_path}")
             start_time = time.time()
 
-            # 加载模型
+            # 在加载新模型前先进行内存清理
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
             try:
-                predictor = SimCSEPredictor(model_path)
-                global_state.predictor = predictor
+                # 加载新模型
+                new_predictor = SimCSEPredictor(model_path)
+
+                # 保存旧模型引用
+                old_predictor = global_state.predictor
+
+                # 原子性地替换模型
+                global_state.set_predictor(new_predictor)
                 global_state.model_path = model_path
+                global_state.model_name = model_name
                 global_state.last_error = None
+                global_state.pending_model_change = None
+
+                # 清理旧模型
+                if old_predictor is not None:
+                    try:
+                        logger.info("开始清理旧模型资源...")
+
+                        # 等待正在处理的请求完成
+                        time.sleep(1.0)
+
+                        # 调用清理方法
+                        old_predictor.cleanup()
+
+                        # 删除旧模型引用
+                        del old_predictor
+
+                        # 强制垃圾回收
+                        gc.collect()
+
+                        # 清理GPU缓存
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+
+                        logger.info("已释放旧模型资源")
+                    except Exception as cleanup_e:
+                        logger.warning(f"清理旧模型时出错: {str(cleanup_e)}")
+
                 load_time = time.time() - start_time
-                logger.info(
-                    f"模型加载成功，类型：{predictor.loss_type}，耗时：{load_time:.2f}秒")
+                logger.info(f"模型加载成功，类型：{model_name}，耗时：{load_time:.2f}秒")
+
+                # 记录内存使用情况
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1024 / 1024
+                    reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                    logger.info(
+                        f"模型加载后GPU内存 - 已分配: {allocated:.2f}MB, 已预留: {reserved:.2f}MB")
+
             except Exception as e:
                 error_msg = f"加载模型时出错：{str(e)}"
                 global_state.last_error = error_msg
+                global_state.pending_model_change = None
                 logger.error(error_msg)
                 import traceback
                 logger.error(traceback.format_exc())
@@ -764,10 +775,9 @@ def load_predictor_in_background(model_path: str):
 
 
 def init_model(model_type=DEFAULT_MODEL):
-    """初始化预测器"""
+    """初始化预测器，避免重复加载"""
     global global_state
 
-    # 如果model_type为空，使用默认值
     model_type = model_type if model_type and model_type.strip() else DEFAULT_MODEL
     logger.info(f"初始化模型类型: {model_type}")
 
@@ -776,30 +786,36 @@ def init_model(model_type=DEFAULT_MODEL):
         logger.info("模型正在加载中，跳过重复初始化")
         return
 
+    # 如果当前模型就是要加载的模型，跳过
+    if global_state.model_name == model_type and global_state.predictor is not None:
+        logger.info(f"模型 {model_type} 已加载，跳过重复初始化")
+        return
+
     with model_lock:
         global_state.init_attempts += 1
 
         # 获取模型路径
-        model_path = MODEL_PATHS.get(model_type)
+        model_name_to_load = model_type
+        model_path = MODEL_PATHS.get(model_name_to_load)
 
         # 如果模型路径不在预定义字典中，则尝试构建可能的路径
         if model_path is None:
             possible_path = os.path.join(
-                BASE_DIR, f'checkpoints_{model_type}/best_model')
+                BASE_DIR, f'checkpoints_{model_name_to_load}/best_model')
             if os.path.exists(possible_path):
                 model_path = possible_path
                 logger.info(f"使用构建的模型路径: {model_path}")
             else:
                 # 尝试查找可用的模型
-                logger.warning(f"警告：未找到指定的模型类型: {model_type}，尝试查找可用模型")
+                logger.warning(f"警告：未找到指定的模型类型: {model_name_to_load}，尝试查找可用模型")
                 available_paths = []
-                for model_name, path in MODEL_PATHS.items():
+                for name, path in MODEL_PATHS.items():
                     if os.path.exists(path):
-                        available_paths.append((model_name, path))
+                        available_paths.append((name, path))
 
                 if available_paths:
-                    model_name, model_path = available_paths[0]
-                    logger.info(f"使用备选模型: {model_name} ({model_path})")
+                    model_name_to_load, model_path = available_paths[0]
+                    logger.info(f"使用备选模型: {model_name_to_load} ({model_path})")
                 else:
                     error_msg = f"错误：没有找到可用的模型，已检查以下路径: {list(MODEL_PATHS.values())}"
                     global_state.last_error = error_msg
@@ -813,9 +829,11 @@ def init_model(model_type=DEFAULT_MODEL):
             logger.error(error_msg)
             return
 
-        # 在后台线程中加载模型
+        # 使用单个线程执行器加载模型，避免创建过多线程
         executor = ThreadPoolExecutor(max_workers=1)
-        executor.submit(load_predictor_in_background, model_path)
+        executor.submit(load_predictor_in_background,
+                        model_path, model_name_to_load)
+        executor.shutdown(wait=False)  # 不等待完成
 
 
 def init_cleaner():
@@ -840,7 +858,41 @@ def init_cleaner():
         import traceback
         logger.error(traceback.format_exc())
 
-# 恢复误删的函数
+
+def get_predictor():
+    """获取当前预测器实例，如果不存在则尝试初始化"""
+    predictor = global_state.get_predictor()
+
+    # 验证预测器是否有效
+    if predictor is not None:
+        # 检查关键属性是否存在
+        if not hasattr(predictor, 'model') or predictor.model is None:
+            logger.warning("预测器的model属性丢失，需要重新初始化")
+            predictor = None
+        elif not hasattr(predictor, 'tokenizer') or predictor.tokenizer is None:
+            logger.warning("预测器的tokenizer属性丢失，需要重新初始化")
+            predictor = None
+
+    # 如果预测器无效且没有正在加载模型，则尝试初始化
+    if predictor is None and not global_state.model_loading:
+        logger.info(f"预测器未初始化或已失效，尝试加载默认模型: {DEFAULT_MODEL}")
+        init_model(DEFAULT_MODEL)
+        # 等待模型加载完成（最多等待10秒）
+        for _ in range(100):
+            if global_state.predictor is not None and not global_state.model_loading:
+                break
+            time.sleep(0.1)
+
+    return global_state.predictor
+
+
+def get_cleaner():
+    """获取当前清洗器实例，如果不存在则尝试初始化"""
+    if global_state.cleaner is None and not global_state.model_loading:
+        init_cleaner()
+    return global_state.cleaner
+
+# 文本处理函数保持不变
 
 
 def extract_english(text: str) -> str:
@@ -858,7 +910,7 @@ def extract_english(text: str) -> str:
         text = text.strip()
         if not text:
             return False
-        pattern = re.compile(r'^[\u4e00-\u9fff\s]+$')
+        pattern = re.compile(r'^[\u4e00-\u9fff\s]+')
         return bool(pattern.match(text))
 
     # 检查是否只包含英文和特殊字符
@@ -929,8 +981,6 @@ def process_text_with_prefix(prefix: str, room_name: str, bed_name: str, is_supp
 
     # 组合成最终格式
     parts = []
-    # if prefix:
-    #     parts.append(f"{SUPPLY_PREFIX} {prefix_text}" if prefix_text else "")
     if room:
         parts.append(f"{ROOM_PREFIX} {room}")
     if bed:
@@ -939,25 +989,175 @@ def process_text_with_prefix(prefix: str, room_name: str, bed_name: str, is_supp
     parts = [part.lower() for part in parts]
     return " ".join(filter(None, parts))
 
+# 定期清理任务
+
+
+async def periodic_cleanup():
+    """定期清理GPU内存的后台任务"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # 每分钟检查一次
+
+            if torch.cuda.is_available():
+                # 获取当前内存使用情况
+                allocated = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                total = torch.cuda.get_device_properties(
+                    0).total_memory / 1024 / 1024
+                usage_percent = (reserved / total) * 100
+
+                # 如果内存使用超过80%，执行清理
+                if usage_percent > 80:
+                    logger.warning(f"GPU内存使用率过高: {usage_percent:.1f}%，执行清理...")
+
+                    # 强制垃圾回收
+                    gc.collect()
+
+                    # 清理预测器的内存
+                    if global_state.predictor is not None:
+                        global_state.predictor.cleanup_memory()
+
+                    # 再次检查内存
+                    new_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                    logger.info(f"清理后GPU内存: {new_reserved:.2f}MB")
+
+        except Exception as e:
+            logger.error(f"定期清理任务出错: {str(e)}")
+
+# 生命周期管理
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行的代码
+    logger.info(f"API服务启动")
+    logger.info(f"当前工作目录: {os.getcwd()}")
+    logger.info(f"BASE_DIR: {BASE_DIR}")
+    logger.info(
+        f"日志文件: {LOG_FILE}，最大大小: {MAX_LOG_SIZE/1024/1024/1024:.1f}GB，保留备份数: {BACKUP_COUNT}")
+
+    # 初始化模型
+    logger.info("开始初始化模型...")
+    init_model()
+
+    # 初始化清洗器
+    logger.info("开始初始化文本清洗器...")
+    init_cleaner()
+
+    # 启动定期清理任务
+    cleanup_task = asyncio.create_task(periodic_cleanup())
+
+    yield  # 这里是应用运行的部分
+
+    # 关闭时执行的代码
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    # 清理资源
+    if global_state.predictor is not None:
+        global_state.predictor.cleanup()
+
+    # 关闭线程池
+    inference_executor.shutdown(wait=True)
+
+    logger.info("API服务关闭")
+
+# 创建FastAPI应用
+app = FastAPI(
+    title="房间匹配服务",
+    description="基于SimCSE的房间文本匹配服务",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# 请求和响应模型
+
+
+class MatchRequest(BaseModel):
+    spl_room_names: List[str]
+    spl_room_bed_names: List[str]
+    s_room_names: List[str]
+    s_room_bed_names: List[str]
+    threshold: float = DEFAULT_THRESHOLD
+    model: str = DEFAULT_MODEL
+    token: str = None
+
+
+class MatchResponse(BaseModel):
+    similarities: List[float]
+    predictions: List[int]
+
+# API端点
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查接口，返回服务状态和GPU内存使用情况"""
+    health_status = {
+        "status": "healthy",
+        "model_loaded": global_state.predictor is not None,
+        "model_loading": global_state.model_loading,
+        "model_path": global_state.model_path if global_state.predictor else None,
+        "model_name": global_state.model_name,
+        "pending_model": global_state.pending_model_change
+    }
+
+    # 添加GPU内存信息
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024 / 1024
+        reserved = torch.cuda.memory_reserved() / 1024 / 1024
+        total = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+
+        health_status["gpu_memory"] = {
+            "allocated_mb": round(allocated, 2),
+            "reserved_mb": round(reserved, 2),
+            "total_mb": round(total, 2),
+            "usage_percent": round((reserved / total) * 100, 2)
+        }
+
+    return health_status
+
+
+@app.post("/cleanup")
+async def manual_cleanup():
+    """手动触发GPU内存清理"""
+    if global_state.predictor is None:
+        raise HTTPException(status_code=503, detail="模型未加载")
+
+    try:
+        # 执行垃圾回收
+        gc.collect()
+
+        # 清理预测器内存
+        global_state.predictor.cleanup_memory()
+
+        # 返回清理后的内存状态
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024 / 1024
+            reserved = torch.cuda.memory_reserved() / 1024 / 1024
+
+            return {
+                "status": "success",
+                "message": "GPU内存清理完成",
+                "gpu_memory": {
+                    "allocated_mb": round(allocated, 2),
+                    "reserved_mb": round(reserved, 2)
+                }
+            }
+        else:
+            return {"status": "success", "message": "内存清理完成（CPU模式）"}
+    except Exception as e:
+        logger.error(f"手动清理失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"清理失败: {str(e)}")
+
 
 @app.post("/match/", response_model=MatchResponse)
 async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
     """
     房间文本匹配接口
-
-    - supplier_names: 供应商名称列表
-    - spl_room_names: 供应商房型名称列表
-    - spl_room_bed_names: 供应商床型名称列表
-    - s_room_names: 母房型名称列表
-    - s_room_bed_names: 母床型名称列表
-    - threshold: 匹配阈值（可选，默认0.5）
-    - model: 使用的模型类型（可选，默认'cross_entropy'）
-    - token: API令牌 (必填)
-
-    返回：
-    - similarities: 相似度列表
-    - predictions: 预测结果列表（1表示匹配，0表示不匹配）
-    - threshold: 使用的阈值
     """
     try:
         # 验证令牌
@@ -997,24 +1197,25 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
                 model_type = DEFAULT_MODEL
         else:
             model_type = DEFAULT_MODEL
-            # logger.info(f"请求ID: {request_id} - 请求未指定模型类型，使用默认模型: {model_type}")
 
-        # 确定模型路径
-        model_path = os.path.join(
-            BASE_DIR, f'checkpoints_{model_type}/best_model')
+        # 使用异步锁防止并发模型加载
+        async with model_loading_lock:
+            # 如果请求的模型与当前加载的不同，则在后台加载新模型
+            if global_state.model_name != model_type and not global_state.model_loading:
+                # 记录要切换的模型
+                model_path = MODEL_PATHS.get(model_type)
+                if model_path and os.path.exists(model_path):
+                    logger.info(
+                        f"请求ID: {request_id} - 需要切换模型: {model_type} ({model_path})")
 
-        # 如果模型类型与当前加载的不同，在后台加载新模型
-        if predictor.model_path != model_path and not global_state.model_loading:
-            # 记录要切换的模型
-            # logger.info(
-            #     f"请求ID: {request_id} - 需要切换模型: {model_type} ({model_path})")
+                    # 在后台加载新模型
+                    background_tasks.add_task(init_model, model_type)
 
-            # 在后台加载新模型
-            background_tasks.add_task(init_model, model_type)
-
-            # 返回使用当前可用模型的信息
-            # logger.info(
-            #     f"请求ID: {request_id} - 继续使用当前模型处理请求：{predictor.model_path}")
+                    logger.info(
+                        f"请求ID: {request_id} - 继续使用当前模型处理请求：{predictor.model_path}")
+                else:
+                    logger.warning(
+                        f"请求ID: {request_id} - 请求的模型类型无效: {model_type}")
 
         # 检查输入列表长度是否一致
         list_lengths = [
@@ -1030,7 +1231,7 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
                 detail="所有输入列表的长度必须相同"
             )
 
-        # 处理文本 - 这里注意要传入cleaner
+        # 处理文本
         source_texts = []
         target_texts = []
 
@@ -1058,16 +1259,15 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
         )
 
         return result
+
+    except HTTPException:
+        raise
     except Exception as e:
         # 清理当前请求所占据的显存
         try:
-            import gc
-            # 强制垃圾回收
             gc.collect()
-            # 清理CUDA缓存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                # 尝试释放更多显存
                 torch.cuda.synchronize()
         except Exception as cleanup_e:
             logger.warning(f"清理显存时出错: {str(cleanup_e)}")
@@ -1076,20 +1276,23 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
         logger.error(f"处理请求时出错: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"处理请求时出错: {str(e)}")
 
-
 if __name__ == "__main__":
-    # 获取可用的worker数量
-    workers = 16
+    # 使用单worker模式避免多进程GPU内存问题
+    workers = 4  # 使用单worker
 
-    # 启动配置，使用更多的worker以提高并发处理能力
-    # 修改启动方式，使用模块导入字符串而不是直接传递应用实例
+    # 根据环境设置uvicorn日志级别
+    app_env = os.environ.get("APP_ENV", "development").lower()
+    uvicorn_log_level = "info" if app_env == "development" else "warning"
+
+    # 启动服务器
     uvicorn.run(
-        "api_server_concurrent:app",  # 使用导入字符串
+        "api_server_concurrent_fix:app",  # 直接传递app实例
         host="0.0.0.0",
-        port=13009,
-        workers=workers,  # 使用多个worker进程
-        log_level="warning",  # 改为warning级别，减少info日志输出
-        access_log=False,  # 关闭HTTP访问日志
+        port=13001,
+        workers=workers,  # 单worker模式
+        log_level=uvicorn_log_level,
+        access_log=(app_env == "development"),
         limit_concurrency=100,  # 限制并发连接数
         timeout_keep_alive=65,  # 保持连接超时时间
+        loop="asyncio",  # 使用asyncio事件循环
     )

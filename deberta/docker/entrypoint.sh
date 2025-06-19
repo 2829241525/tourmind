@@ -16,4 +16,4 @@ echo "CUDA可用: $(python -c 'import torch; print(torch.cuda.is_available())')"
 
 # 启动API服务
 echo "启动房间匹配API服务..."
-exec python -u /app/api_server_concurrent.py 
+exec python -u /app/api_server_concurrent_fix.py 

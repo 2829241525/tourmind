@@ -13,11 +13,11 @@ NC='\033[0m' # 无颜色
 
 # 显示脚本说明
 echo -e "${GREEN}房间匹配API服务更新脚本 - 并发版本${NC}"
-echo "此脚本将把服务更新到并发版本，使用api_server_concurrent.py"
+echo "此脚本将把服务更新到并发版本，使用api_server_concurrent_fix.py"
 
-# 检查是否存在api_server_concurrent.py
-if [ ! -f "./api_server_concurrent.py" ]; then
-    echo -e "${RED}错误：api_server_concurrent.py 文件不存在！${NC}"
+# 检查是否存在api_server_concurrent_fix.py
+if [ ! -f "./api_server_concurrent_fix.py" ]; then
+    echo -e "${RED}错误：api_server_concurrent_fix.py 文件不存在！${NC}"
     exit 1
 fi
 
@@ -30,11 +30,11 @@ fi
 
 # 更新Dockerfile（如果已存在）
 echo -e "${YELLOW}更新Dockerfile...${NC}"
-sed -i 's/COPY api_server.py/COPY api_server_concurrent.py/g' ./docker/Dockerfile
+sed -i 's/COPY api_server.py/COPY api_server_concurrent_fix.py/g' ./docker/Dockerfile
 
 # 更新entrypoint.sh
 echo -e "${YELLOW}更新entrypoint.sh...${NC}"
-sed -i 's/api_server.py/api_server_concurrent.py/g' ./docker/entrypoint.sh
+sed -i 's/api_server.py/api_server_concurrent_fix.py/g' ./docker/entrypoint.sh
 
 # 更新requirements.txt，添加新的依赖项
 echo -e "${YELLOW}更新requirements.txt...${NC}"
