@@ -72,11 +72,11 @@ if MODEL_PATHS_JSON:
     except Exception as e:
         logger.error(f"解析MODEL_PATHS_JSON环境变量时出错: {str(e)}")
         MODEL_PATHS = {
-            'mdeberta': os.path.join(BASE_DIR, 'checkpoints_group_result/best_model')
+            'mdeberta': os.path.join(BASE_DIR, 'checkpoints_group_result_fix/best_model')
         }
 else:
     MODEL_PATHS = {
-        'mdeberta': os.path.join(BASE_DIR, 'checkpoints_group_result/best_model')
+        'mdeberta': os.path.join(BASE_DIR, 'checkpoints_group_result_fix/best_model')
     }
 
 # 从环境变量获取默认模型类型
@@ -975,7 +975,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "api_server_mdeberta_group:app",  # 使用导入字符串
         host="0.0.0.0", 
-        port=13004,
+        port=13008,
         workers=workers,  # 使用多个worker进程
         log_level="info",
         limit_concurrency=100,  # 限制并发连接数

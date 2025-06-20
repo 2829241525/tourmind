@@ -333,9 +333,15 @@ class DeBERTaTrainer:
                 continue
 
             # 更新进度条
+            if hasattr(self, 'scheduler') and self.scheduler is not None:
+                current_lr = self.scheduler.get_last_lr()[0]
+            else:
+                # 使用恒定学习率时，显示优化器的学习率
+                current_lr = self.optimizer.param_groups[0]['lr']
+
             progress_bar.set_postfix({
                 'loss': f'{batch_loss:.4f}',
-                'lr': f'{self.scheduler.get_last_lr()[0]:.2e}' if hasattr(self, 'scheduler') else 'N/A'
+                'lr': f'{current_lr:.2e}'
             })
 
             # 在累积足够的梯度后更新参数
@@ -368,7 +374,7 @@ class DeBERTaTrainer:
                     self.optimizer.step()
 
                 # 更新学习率
-                if hasattr(self, 'scheduler'):
+                if hasattr(self, 'scheduler') and self.scheduler is not None:
                     self.scheduler.step()
 
                 self.optimizer.zero_grad()
@@ -535,7 +541,7 @@ class DeBERTaTrainer:
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self, 'scheduler') else None,
+            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self, 'scheduler') and self.scheduler is not None else None,
             'valid_loss': valid_loss,
             'config': self.config
         }
@@ -581,7 +587,7 @@ class DeBERTaTrainer:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
             # 加载调度器状态（如果存在）
-            if hasattr(self, 'scheduler') and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
+            if hasattr(self, 'scheduler') and self.scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
                 self.scheduler.load_state_dict(
                     checkpoint['scheduler_state_dict'])
 
@@ -650,27 +656,59 @@ class DeBERTaTrainer:
         if 'scheduler' in self.config and isinstance(self.config['scheduler'], dict):
             num_training_steps = self.config['scheduler'].get(
                 'num_training_steps', total_steps)
-            num_warmup_steps = self.config['scheduler'].get(
-                'num_warmup_steps', 0)
+
+            # 检查是否启用warmup
+            enable_warmup = self.config['scheduler'].get('enable_warmup', True)
+            if enable_warmup:
+                # 如果明确指定了warmup步数，使用指定值
+                if 'num_warmup_steps' in self.config['scheduler']:
+                    num_warmup_steps = self.config['scheduler']['num_warmup_steps']
+                else:
+                    # 使用warmup_ratio计算默认步数
+                    num_warmup_steps = int(
+                        num_training_steps * self.config.get('warmup_ratio', 0.1))
+            else:
+                num_warmup_steps = 0
         else:
             num_training_steps = max(
                 total_steps,
                 self.config.get('scheduler', {}).get(
                     'num_training_steps', 100)
             )
-            # 预热步数
-            num_warmup_steps = int(
-                num_training_steps * self.config.get('warmup_ratio', 0.1))
-            # 如果配置中有明确指定预热步数，则使用配置中的值
-            if 'num_warmup_steps' in self.config.get('scheduler', {}):
-                num_warmup_steps = self.config.get('scheduler', {}).get(
-                    'num_warmup_steps', num_warmup_steps)
 
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps
-        )
+            # 检查是否启用warmup（全局配置）
+            enable_warmup = self.config.get('enable_warmup', True)
+            if enable_warmup:
+                # 如果明确指定了warmup步数，使用指定值
+                if 'num_warmup_steps' in self.config.get('scheduler', {}):
+                    num_warmup_steps = self.config.get(
+                        'scheduler', {}).get('num_warmup_steps')
+                else:
+                    # 使用warmup_ratio计算默认步数
+                    num_warmup_steps = int(
+                        num_training_steps * self.config.get('warmup_ratio', 0.1))
+            else:
+                num_warmup_steps = 0
+
+        # 根据配置选择学习率调度器
+        use_constant_lr = self.config.get('scheduler', {}).get(
+            'use_constant_lr', False) if 'scheduler' in self.config else self.config.get('use_constant_lr', False)
+
+        if not enable_warmup and use_constant_lr:
+            # 禁用warmup且使用恒定学习率时，不设置调度器（保持恒定学习率）
+            self.scheduler = None
+            logger.info("使用恒定学习率调度器（无学习率衰减）")
+        else:
+            # 使用线性warmup和衰减调度器
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps
+            )
+            if enable_warmup:
+                logger.info("使用线性warmup + 线性衰减学习率调度器")
+            else:
+                logger.info("使用线性衰减学习率调度器（无warmup）")
 
         # 加载检查点
         start_epoch, best_valid_loss = self.load_checkpoint()
@@ -684,7 +722,19 @@ class DeBERTaTrainer:
         logger.info(
             f"混合精度训练(FP16): {'启用' if self.config.get('fp16', False) else '禁用'}")
         logger.info(f"总训练步数: {num_training_steps}")
-        logger.info(f"预热步数: {num_warmup_steps}")
+
+        # 输出warmup状态
+        enable_warmup = self.config.get('scheduler', {}).get(
+            'enable_warmup', True) if 'scheduler' in self.config else self.config.get('enable_warmup', True)
+        if enable_warmup:
+            logger.info(f"预热设置: 启用，预热步数: {num_warmup_steps}")
+            if num_warmup_steps > 0:
+                warmup_ratio = num_warmup_steps / \
+                    num_training_steps if num_training_steps > 0 else 0
+                logger.info(f"预热比例: {warmup_ratio:.2%}")
+        else:
+            logger.info("预热设置: 禁用")
+
         logger.info(f"数据集大小: {len(train_dataset)}")
         logger.info(f"批次大小: {self.config.get('batch_size', 64)}")
         logger.info(
@@ -759,7 +809,10 @@ class DeBERTaTrainer:
                 break
 
             # 显示当前学习率
-            current_lr = self.scheduler.get_last_lr()[0]
+            if hasattr(self, 'scheduler') and self.scheduler is not None:
+                current_lr = self.scheduler.get_last_lr()[0]
+            else:
+                current_lr = self.optimizer.param_groups[0]['lr']
             logger.info(f'  当前学习率: {current_lr:.2e}')
 
         # 训练结束后保存最终模型
