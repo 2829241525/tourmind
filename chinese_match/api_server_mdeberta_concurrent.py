@@ -63,18 +63,6 @@ SUPPLY_PREFIX = ""
 ROOM_PREFIX = ""
 BED_PREFIX = ""
 
-# 模型路径映射 - 从环境变量中获取
-# MODEL_PATHS_JSON = os.environ.get('MODEL_PATHS_JSON')
-# if MODEL_PATHS_JSON:
-#     try:
-#         MODEL_PATHS = json.loads(MODEL_PATHS_JSON)
-#         logger.info(f"从环境变量加载模型路径映射: {MODEL_PATHS}")
-#     except Exception as e:
-#         logger.error(f"解析MODEL_PATHS_JSON环境变量时出错: {str(e)}")
-#         MODEL_PATHS = {
-#             'mdeberta': os.path.join(BASE_DIR, 'checkpoints_group_result/best_model')
-#         }
-# else:
 MODEL_PATHS = {
     'mdeberta': os.path.join(BASE_DIR, 'checkpoints_mdeberta_prefix_3e/best_model')
     }
@@ -84,7 +72,7 @@ DEFAULT_MODEL = os.environ.get('MODEL_TYPE', 'mdeberta')
 logger.info(f"使用默认模型类型: {DEFAULT_MODEL}")
 
 MAPPING_PATH = os.path.join(BASE_DIR, 'data/mapping.xlsx')
-MAX_LENGTH = 80
+MAX_LENGTH = 80 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 DEFAULT_THRESHOLD = 0.9
 
