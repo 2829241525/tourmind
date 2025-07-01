@@ -102,7 +102,7 @@ class DeBERTaTrainer:
 
         # 指定使用 GPU
         self.device = torch.device(
-            'cuda:1' if torch.cuda.is_available() else 'cpu')
+            'cuda:0' if torch.cuda.is_available() else 'cpu')
         logger.info(f"使用设备: {self.device}")
 
         # 初始化日志记录器
@@ -182,6 +182,20 @@ class DeBERTaTrainer:
 
         self.best_valid_loss = float('inf')
         self.current_epoch = 0
+
+        # 输出轻量级检查点配置状态
+        light_checkpoint = self.config.get('light_checkpoint', False)
+        logger.info(
+            f"检查点模式: {'轻量级' if light_checkpoint else '完整'} - {'轻量级模式可减少约70%存储空间，但重启训练时优化器状态会重置' if light_checkpoint else '包含完整的模型、优化器和调度器状态'}")
+
+        # 输出学习率调度器重置配置状态
+        reset_scheduler = self.config.get('reset_scheduler', False)
+        learning_rate = self.config.get('learning_rate', 2e-5)
+        if reset_scheduler:
+            strategy_msg = f"重置 - 从新的学习率开始训练，当前设置: {learning_rate}"
+        else:
+            strategy_msg = "恢复 - 继续使用checkpoint中保存的学习率状态"
+        logger.info(f"学习率调度器恢复策略: {strategy_msg}")
 
     def encode_text(self, texts, train=True):
         """
@@ -523,13 +537,14 @@ class DeBERTaTrainer:
 
         return avg_loss
 
-    def save_checkpoint(self, epoch, valid_loss):
+    def save_checkpoint(self, epoch, valid_loss, light_checkpoint=False):
         """
         保存检查点
 
         Args:
             epoch: 当前epoch
             valid_loss: 验证损失
+            light_checkpoint: 是否保存轻量级检查点（不包含优化器状态）
         """
         # 创建保存目录
         save_dir = Path(self.config['save_dir'])
@@ -537,16 +552,29 @@ class DeBERTaTrainer:
 
         # 保存检查点
         checkpoint_path = save_dir / 'checkpoint.pt'
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self, 'scheduler') and self.scheduler is not None else None,
-            'valid_loss': valid_loss,
-            'config': self.config
-        }
+
+        if light_checkpoint:
+            # 轻量级检查点，只保存模型参数和基本信息
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'valid_loss': valid_loss,
+                'config': self.config
+            }
+            logger.info(f"保存轻量级检查点到: {checkpoint_path} (不包含优化器状态)")
+        else:
+            # 完整检查点，包含所有状态
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self, 'scheduler') and self.scheduler is not None else None,
+                'valid_loss': valid_loss,
+                'config': self.config
+            }
+            logger.info(f"保存完整检查点到: {checkpoint_path}")
+
         torch.save(checkpoint, checkpoint_path)
-        logger.info(f"保存检查点到: {checkpoint_path}")
 
         # 如果是最佳模型，则同时保存模型和tokenizer
         if valid_loss < self.best_valid_loss:
@@ -583,13 +611,33 @@ class DeBERTaTrainer:
             # 加载模型状态
             self.model.load_state_dict(checkpoint['model_state_dict'])
 
-            # 加载优化器状态
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # 加载优化器状态（如果存在且配置允许）
+            reset_scheduler = self.config.get('reset_scheduler', False)
+            if 'optimizer_state_dict' in checkpoint and not reset_scheduler:
+                self.optimizer.load_state_dict(
+                    checkpoint['optimizer_state_dict'])
+                logger.info("加载优化器状态")
+            elif 'optimizer_state_dict' in checkpoint and reset_scheduler:
+                # 如果要重置调度器，也重置优化器中的学习率，但保留其他状态
+                optimizer_state = checkpoint['optimizer_state_dict']
+                self.optimizer.load_state_dict(optimizer_state)
+                # 重置学习率为配置中的值
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = self.config.get('learning_rate', 2e-5)
+                logger.info(
+                    f"加载优化器状态但重置学习率为: {self.config.get('learning_rate', 2e-5)}")
+            else:
+                logger.info("检查点不包含优化器状态，使用新初始化的优化器状态")
 
-            # 加载调度器状态（如果存在）
-            if hasattr(self, 'scheduler') and self.scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
+            # 加载调度器状态（如果存在且配置允许）
+            if reset_scheduler:
+                logger.info("配置要求重置学习率调度器，将使用新的学习率开始训练")
+            elif hasattr(self, 'scheduler') and self.scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
                 self.scheduler.load_state_dict(
                     checkpoint['scheduler_state_dict'])
+                logger.info("加载学习率调度器状态，继续使用之前的学习率")
+            else:
+                logger.info("检查点不包含调度器状态或调度器未初始化，将使用新的学习率")
 
             # 返回上次训练的epoch和验证损失
             return checkpoint['epoch'] + 1, checkpoint.get('valid_loss', float('inf'))
@@ -775,8 +823,9 @@ class DeBERTaTrainer:
             logger.info(f'  训练损失: {train_loss:.4f}')
             logger.info(f'  验证损失: {valid_loss:.4f}')
 
-            # 保存检查点
-            self.save_checkpoint(epoch, valid_loss)
+            # 保存检查点（根据配置选择轻量级或完整检查点）
+            light_checkpoint = self.config.get('light_checkpoint', False)
+            self.save_checkpoint(epoch, valid_loss, light_checkpoint)
 
             # 保存最佳模型
             if valid_loss < self.best_valid_loss:

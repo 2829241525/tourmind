@@ -64,7 +64,7 @@ ROOM_PREFIX = ""
 BED_PREFIX = ""
 
 MODEL_PATHS = {
-    'mdeberta': os.path.join(BASE_DIR, 'checkpoints_mdeberta_prefix_3e/best_model')
+    'mdeberta': os.path.join(BASE_DIR, 'checkpoints_mdeberta_side_fix/best_model')
     }
 
 # 从环境变量获取默认模型类型

@@ -7,7 +7,6 @@ DeBERTa模型训练脚本
 import os
 import argparse
 import logging
-import torch
 from trainer import DeBERTaTrainer, print_gpu_memory, clear_gpu_memory
 
 # 设置tokenizer并行性
