@@ -17,11 +17,12 @@ import torch.nn.functional as F
 # ===================== 配置区域 =====================
 # 路径配置
 BASE_DIR = "/home/maxon/disk2/roomMatch/room_match/chinese_match"
-MODEL_PATH = os.path.join(BASE_DIR, 'checkpoints_mdeberta_prefix/best_model')
+MODEL_PATH = os.path.join(BASE_DIR, 'checkpoints_group_result/best_model')
 #TEST_FILE = os.path.join("/home/maxon/disk2/roomMatch/room_match/rft/process/training_data_20250526_205100.csv")
-TEST_FILE = os.path.join(BASE_DIR, 'data/processed_country_room_valid.csv')
+# TEST_FILE = os.path.join(BASE_DIR, 'data/processed_country_room_valid.csv')
 # TEST_FILE = os.path.join(BASE_DIR, 'data/merged_filtered_result.csv')
-# TEST_FILE = os.path.join(BASE_DIR, 'data/room_group_test.csv')
+TEST_FILE = os.path.join(BASE_DIR, 'data/room_group_test.csv')
+#TEST_FILE = os.path.join(BASE_DIR, 'data/all_cn_data_processed_test.csv')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'evaluation_results')
 
 

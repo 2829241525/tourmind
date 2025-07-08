@@ -17,7 +17,7 @@ import torch.nn.functional as F
 # ===================== 配置区域 =====================
 # 路径配置
 BASE_DIR = "/home/maxon/disk2/roomMatch/room_match/hotel_match"
-MODEL_PATH = os.path.join(BASE_DIR, 'checkpoints_hotel/best_model')
+MODEL_PATH = os.path.join(BASE_DIR, 'checkpoints_hotel_v4_12e/best_model')
 # TEST_FILE = os.path.join(BASE_DIR, 'data/processed_country_room_valid.csv')
 # TEST_FILE = os.path.join(BASE_DIR, 'data/merged_filtered_result.csv')
 TEST_FILE = os.path.join(BASE_DIR, 'data/hotel_samples_test.csv')
