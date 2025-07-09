@@ -42,7 +42,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
+ 
 
 def concat_room_bed(row):
     """将RoomName和BedTypeDesc拼接"""
