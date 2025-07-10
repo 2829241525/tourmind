@@ -31,7 +31,7 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练DeBERTa模型')
     parser.add_argument(
-        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/chinese_match/config/config_mdeberta.json", help='配置文件路径')
+        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/chinese_match/config/config_mdeberta_room_group.json", help='配置文件路径')
     args = parser.parse_args()
 
     # 创建训练器，并传递配置覆盖

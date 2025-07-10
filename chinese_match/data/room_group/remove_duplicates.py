@@ -5,15 +5,6 @@ import numpy as np
 import re
 
 
-def detect_file_encoding(file_path):
-    """检测文件编码"""
-    import chardet
-    with open(file_path, 'rb') as f:
-        raw_data = f.read()
-        result = chardet.detect(raw_data)
-        return result['encoding']
-
-
 def merge_and_remove_conflicts(input_files, output_file):
     # 合并所有CSV文件
     print("开始合并CSV文件...")
@@ -85,6 +76,9 @@ def merge_and_remove_conflicts(input_files, output_file):
     cleaned_rows = len(df)
     print(f"数据清理完成，从 {initial_rows} 行清理到 {cleaned_rows} 行")
 
+    # 步骤1：合并和清理完成
+    print(f"步骤1完成：数据合并和清理，处理后行数: {len(df)}")
+
     # 找出'spl_room_text'和's_room_text'相同的组
     grouped = df.groupby(['spl_room_text', 's_room_text'])
 
@@ -109,63 +103,70 @@ def merge_and_remove_conflicts(input_files, output_file):
         print('没有发现文本相同但标签不同的数据')
         df_clean = df
 
+    # 步骤2：删除冲突数据完成
+    print(f"步骤2完成：删除冲突数据，处理后行数: {len(df_clean)}")
+
     # 基于指定列删除重复行
     df_unique = df_clean.drop_duplicates(
         subset=['spl_room_text', 's_room_text', 'label'], keep='first')
 
+    # 步骤3：删除重复行完成
+    print(f"步骤3完成：删除重复行，处理后行数: {len(df_unique)}")
+
+    # 步骤4：数据平衡处理（已注释掉）
+    # print("开始处理数据平衡...")
     # 根据spl_room_text分组处理数据平衡问题
-    print("开始处理数据平衡...")
-
-    # 根据spl_room_text分组
-    spl_groups = df_unique.groupby('spl_room_text')
-
-    # 存储要保留的索引
-    indices_to_keep = []
-
+    # spl_groups = df_unique.groupby('spl_room_text')
+    # 存储要保留的数据行
+    # balanced_rows = []
     # 遍历每个分组
-    for spl_text, group in spl_groups:
-        # 计算label为0和1的数量
-        label_0_count = (group['label'] == 0).sum()
-        label_1_count = (group['label'] == 1).sum()
+    # for spl_text, group in spl_groups:
+    #     # 计算label为0和1的数量
+    #     label_0_count = (group['label'] == 0).sum()
+    #     label_1_count = (group['label'] == 1).sum()
+    #     # 如果没有label=1的数据，保留所有数据
+    #     if label_1_count == 0:
+    #         print(f"分组 '{spl_text}' 中不存在label=1的数据，保留所有数据")
+    #         balanced_rows.append(group.copy())
+    #         continue
+    #     # 如果label为0的比例过高（超过10:1）
+    #     if label_0_count / label_1_count > 10:
+    #         # 计算需要保留的label为0的样本数
+    #         target_0_count = label_1_count * 10
+    #         # 获取label为0和1的数据
+    #         label_0_data = group[group['label'] == 0].copy()
+    #         label_1_data = group[group['label'] == 1].copy()
+    #         # 随机选择要保留的label为0的样本
+    #         np.random.seed(42)  # 设置随机种子以确保结果可复现
+    #         if len(label_0_data) > target_0_count:
+    #             label_0_selected = label_0_data.sample(
+    #                 n=int(target_0_count), random_state=42)
+    #         else:
+    #             label_0_selected = label_0_data
+    #         # 合并要保留的数据
+    #         group_balanced = pd.concat(
+    #             [label_0_selected, label_1_data], ignore_index=False)
+    #         balanced_rows.append(group_balanced)
+    #         print(
+    #             f"分组 '{spl_text}' 中label比例不平衡：{label_0_count}:{label_1_count}，调整为 {len(label_0_selected)}:{label_1_count}")
+    #     else:
+    #         # 如果比例正常，保留所有数据
+    #         balanced_rows.append(group.copy())
+    # # 合并所有平衡后的数据
+    # if balanced_rows:
+    #     df_unique = pd.concat(balanced_rows, ignore_index=True)
+    # else:
+    #     # 如果没有数据，保持原来的数据框但清空
+    #     df_unique = df_unique.iloc[0:0].copy()
+    # # 确保数据类型正确
+    # if len(df_unique) > 0:
+    #     df_unique['SHotelId'] = df_unique['SHotelId'].astype('int64')
+    #     df_unique['label'] = df_unique['label'].astype('int64')
+    #     df_unique['spl_room_text'] = df_unique['spl_room_text'].astype('str')
+    #     df_unique['s_room_text'] = df_unique['s_room_text'].astype('str')
 
-        # 如果没有label=1的数据，保留所有数据
-        if label_1_count == 0:
-            print(f"分组 '{spl_text}' 中不存在label=1的数据，保留所有数据")
-            indices_to_keep.extend(list(group.index))
-            continue
-
-        # 如果label为0的比例过高（超过10:1）
-        if label_0_count / label_1_count > 10:
-            # 计算需要保留的label为0的样本数
-            target_0_count = label_1_count * 10
-
-            # 随机选择要保留的label为0的样本
-            label_0_indices = group[group['label'] == 0].index
-            np.random.seed(42)  # 设置随机种子以确保结果可复现
-            indices_to_keep_0 = np.random.choice(
-                label_0_indices,
-                size=int(target_0_count),
-                replace=False
-            )
-
-            # 保留所有label为1的样本
-            label_1_indices = group[group['label'] == 1].index
-
-            # 合并要保留的索引
-            indices_to_keep.extend(list(indices_to_keep_0))
-            indices_to_keep.extend(list(label_1_indices))
-
-            print(
-                f"分组 '{spl_text}' 中label比例不平衡：{label_0_count}:{label_1_count}，调整为 {target_0_count}:{label_1_count}")
-        else:
-            # 如果比例正常，保留所有数据
-            indices_to_keep.extend(list(group.index))
-
-    # 根据索引筛选数据
-    balanced_df = df_unique.loc[indices_to_keep]
-
-    # 更新df_unique为平衡后的数据
-    df_unique = balanced_df.reset_index(drop=True)
+    # 步骤4：数据平衡处理（已跳过）
+    print(f"步骤4完成：跳过数据平衡处理，保持行数: {len(df_unique)}")
 
     # 处理spl_room_text和s_room_text中的空格问题
     print("处理spl_room_text和s_room_text中的空格问题...")
@@ -186,6 +187,9 @@ def merge_and_remove_conflicts(input_files, output_file):
 
     print(f"空格处理完成")
     print(f"数据平衡处理完成，处理后的行数: {len(df_unique)}")
+
+    # 步骤5：空格处理完成
+    print(f"步骤5完成：空格处理，处理后行数: {len(df_unique)}")
 
     # 确保最终输出格式与原始文件一致
     print("确保输出格式一致...")
@@ -223,11 +227,14 @@ def merge_and_remove_conflicts(input_files, output_file):
     after_filter_rows = len(df_unique)
     print(f"最终过滤完成，从 {before_filter_rows} 行过滤到 {after_filter_rows} 行")
 
+    # 步骤6：最终过滤完成
+    print(f"步骤6完成：最终过滤，处理后行数: {len(df_unique)}")
+
     # 保存去重后的结果到新的CSV文件
     df_unique.to_csv(output_file, index=False, encoding='utf-8')
 
     # 打印统计信息
-    conflicts_removed = len(conflict_indices)
+    conflicts_removed = len(conflict_indices) if conflict_indices else 0
     clean_rows = len(df_clean)
     final_rows = len(df_unique)
 
@@ -247,6 +254,9 @@ def merge_and_remove_conflicts(input_files, output_file):
     for label, count in label_counts.items():
         percentage = (count / final_rows) * 100
         print(f'标签 {label}: {count} 条数据 ({percentage:.2f}%)')
+
+    print(f'\n=== 输出文件 ===')
+    print(f'最终输出文件: {output_file}')
 
 
 if __name__ == '__main__':

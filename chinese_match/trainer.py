@@ -102,7 +102,7 @@ class DeBERTaTrainer:
 
         # 指定使用 GPU
         self.device = torch.device(
-            'cuda:0' if torch.cuda.is_available() else 'cpu')
+            'cuda:1' if torch.cuda.is_available() else 'cpu')
         logger.info(f"使用设备: {self.device}")
 
         # 初始化日志记录器
