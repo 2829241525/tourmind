@@ -126,10 +126,6 @@ class DeBERTaTrainer:
         clear_gpu_memory()
         print_gpu_memory()
 
-        # 使用cross_entropy损失函数
-        self.loss_type = 'cross_entropy'
-        logger.info(f"使用损失函数类型: {self.loss_type}")
-
         # 检查是否存在之前训练的最佳模型
         best_model_path = os.path.join(self.config['save_dir'], 'best_model')
         if os.path.exists(best_model_path):
