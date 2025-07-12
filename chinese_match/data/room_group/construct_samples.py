@@ -222,7 +222,7 @@ def main():
     """
     主程序入口
     """
-    csv_file_path = "/home/maxon/disk2/roomMatch/room_match/chinese_match/data/room_group/问题房型.csv"
+    csv_file_path = "/home/maxon/disk2/roomMatch/room_match/chinese_match/data/room_group/前7200的问题房型.csv"
 
     # 构造样本
     samples_df = construct_samples(csv_file_path)
@@ -237,7 +237,7 @@ def main():
     print(samples_df.head())
 
     # 保存结果
-    output_path = "/home/maxon/disk2/roomMatch/room_match/chinese_match/data/room_group/constructed_samples.csv"
+    output_path = "/home/maxon/disk2/roomMatch/room_match/chinese_match/data/room_group/constructed_samples_7200.csv"
     samples_df.to_csv(output_path, index=False, encoding='utf-8')
     print(f"\n样本已保存到: {output_path}")
 
