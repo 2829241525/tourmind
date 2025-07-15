@@ -22,8 +22,9 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR)))
 
 # 默认文件路径配置
-DEFAULT_INPUT_FILE = os.path.join(CURRENT_DIR, "xhs_artical.json")
-DEFAULT_OUTPUT_FILE = os.path.join(CURRENT_DIR, "processed_xhs_articles.jsonl")
+DEFAULT_INPUT_FILE = os.path.join(CURRENT_DIR, "xhs_artical2.json")
+DEFAULT_OUTPUT_FILE = os.path.join(
+    CURRENT_DIR, "processed_xhs_articles_1000.jsonl")
 
 # API限流配置
 QPM_LIMIT = 1200  # 每分钟查询次数限制
@@ -269,12 +270,22 @@ def load_xhs_articles(input_file: str) -> List[Dict[str, Any]]:
         input_file: 输入文件路径
 
     Returns:
-        List[Dict]: 文章数据列表
+        List[Dict]: 文章数据列表（最多1000篇）
     """
     try:
         with open(input_file, 'r', encoding='utf-8') as f:
             articles = json.load(f)
-        logger.info(f"成功加载 {len(articles)} 篇文章")
+
+        # 限制最多加载1000篇文章
+        total_articles = len(articles)
+        articles = articles[:1000]
+        loaded_count = len(articles)
+
+        if total_articles > 1000:
+            logger.info(f"文件包含 {total_articles} 篇文章，已加载前 {loaded_count} 篇")
+        else:
+            logger.info(f"成功加载 {loaded_count} 篇文章")
+
         return articles
     except Exception as e:
         logger.error(f"加载文章失败: {str(e)}")

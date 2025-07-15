@@ -6,10 +6,11 @@
 调用LLM判断spl_room_text和s_room_text是否能分组
 
 特点：
-- 基于真实客户感知能力判断
-- 区分明显差异和微小差异  
-- 特殊处理笼统描述的降级风险
-- 支持批量处理，提高效率
+- 基于真实客户感知能力判断，优先级处理（等级>人数>其他）
+- 同等级房型兼容性强化，避免床型细节过度纠结
+- 不考虑房间空间匹配问题，专注实质性差异
+- 支持多线程并发处理，最大20个线程，大幅提升效率
+- 特殊处理笼统描述，避免误判降级风险
 
 使用方法：
 python room_grouping_processor_v2.py
@@ -27,6 +28,8 @@ import sys
 import logging
 import time
 from typing import Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 优先使用本地langchain源码
 LANGCHAIN_MASTER_PATH = "/home/maxon/disk2/roomMatch/room_match/Langchain/langchain-master"
@@ -38,10 +41,10 @@ sys.path.insert(0, os.path.join(
 # 导入langchain组件
 
 
-# LLM配置
+# LLM配置qwen-plus DeepSeek-R1-0528
 LLM_CONFIG = {
     'qwen': {
-        'model_name': 'qwen-plus',
+        'model_name': 'deepseek-r1',
         'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         'temperature': 0.1,
         'max_tokens': 500,
@@ -99,88 +102,65 @@ class RoomGroupingProcessor:
 3. **按最低配置理解模糊描述**：对于不明确的描述，按最基础配置处理
 4. **评估or选择的风险**：描述中有"or"表示可能提供任意一种，需考虑最差情况
 
-判断原则（基于客户真实感知能力）：
+判断原则（基于客户真实感知能力，按优先级排序）：
 
-**客户能够明显感知的差异（会投诉）**：
-- 床数量明显差异：1张床 vs 2张床
-- 床型实质差异：单人床 vs 双人床 vs 大床（不包括同类型的尺寸微差）
-- 房间等级明显差异：standard vs deluxe vs suite
+**优先级1：房型等级匹配**
+- 同等级房型（如superior vs superior，classic vs classic）通常可以分组
+- 不同等级房型（如standard vs deluxe vs suite）客户能明显感知，会投诉
+
+**优先级2：入住人数匹配**
+- 两个房型都能满足标明的入住人数要求时，优先考虑分组
+- 例如：都标明"for 1 adults"或都能容纳相同人数
+
+**优先级3：实质性设施差异**
 - 关键设施差异：有厨房 vs 无厨房，有阳台 vs 无阳台
 - 景观实质差异：海景 vs 山景 vs 无景观
 
-**客户无法感知或不会投诉的差异（可以分组）**：
-- 重复描述差异：如"2 double beds,2 double beds" vs "2 double beds"
-- 表述顺序差异：如"standard triple room" vs "triple triple standard"
+**在房型等级一致且入住人数匹配的前提下，以下差异客户通常不会投诉（可以分组）**：
+- 床型描述差异：twin vs double vs 未明确床型（只要能满足入住人数）
+- 床数量差异：只要能满足每人有床睡（例如1人入住，1张床和2张床都可接受）
+- 人数标注差异：一方明确标注"for X adults"，另一方未标注（同等级房型能容纳相同人数）
+- 房间空间担忧：不考虑房间大小或空间匹配问题，同等级房型空间基本一致
+- 重复描述差异：如"2 double beds,2 double beds" vs "2 double beds"，因为"2 double beds,2 double beds"可简化为"2 double beds"。类似的场景同样适用。
+- 表述顺序差异：如"standard triple room" vs "triple standard room"
 - 语言差异：如"双人房" vs "double room"
-- 描述详细程度差异：如"room,2 double beds" vs "2 double beds"（实质都是双床房）
+- 描述详细程度差异：如"superior room" vs "superior twin"（等级一致）
 - 床型尺寸微小差别：queen vs full（客户往往无法精确区分）
 - 房间面积的小幅差异
 - 装修时间等附加信息：newly renovated vs 普通
 
 **笼统描述的特殊处理**：
-- 如果一方描述笼统但另一方明确，需评估是否存在实质降级
-- 例如："superior double/twin" vs "superior room" - 前者有床型选择权，后者无
-- 但"room,2 double beds" vs "2 double beds" - 实质都提供2张双人床
+- 笼统房型描述，默认为1人入住，1张床。
+- 如果两个房型等级相同且都能满足入住人数，笼统描述不视为降级
+- 不要因为人数标注差异而担心房间空间或设施不匹配
+- 对于任何等级的房型，只要等级一致且能容纳相同人数，一方有详细描述（包含床型、人数标注等），另一方描述笼统，都可以分组
+- 只有当房型等级明显不同时才考虑降级风险
 
 房型组合数据：
 {room_pairs}
 
 请按照以下格式返回结果，每组一行：
-组1: NO  | 作为客户我看到的房型描述中的房型/床型/景观为：xxx，实际入住发现房型/床型/景观为xxx，他们的差异让我受到了影响。
+组1: NO  | 作为客户我会因为：xxx（具体原因）而进行投诉。如果是床数量问题，请说明A的床数量是多少，B的床数量是多少。
 组2: YES | 不投诉
 ...
 
 分析要求：
-- 如果判断为NO，请明确说明客户能够明显感知到的实质性差异。只有判断为大概率会投诉的情况，才给出NO，否则给出YES。
+- **按优先级顺序判断**：
+  1. 首先检查房型等级是否一致（superior、classic、deluxe等）
+  2. 然后确认是否都能满足入住人数要求
+  3. 最后考虑其他实质性差异
+  4. 对于返回的NO的都要进行回看，是否有重复词汇的判断错误的，如果有，请重新判断；
+    是否有未标明人数和床数的，没有默认为1人入住而造成判断错误的，如果有，请重新判断。
+    是否有带有standard描述的房型判断错误的，如果有，请根据standard忽略的规则重新判断。
+- 所有的standard描述，standard这个词汇是可以忽略的，比如standard twin room 和 twin room 是同一种房型等级，suite 和standard suite是同一种房型等级
+- **等级一致且人数匹配的原则**：如果两个房型等级相同且都能满足入住人数，默认判断为YES
+- **床型差异的宽容处理**：在等级一致且人数匹配的前提下，床型差异（twin、double、未明确等）不应导致NO判断
+- **投诉门槛要求**：只有客户大概率会投诉的明显实质性差异才判断为NO，否则给出YES
+- 如果判断为NO，请明确说明客户能够明显感知到的实质性差异，并且该差异不是床型细节问题
 - 如果判断为YES，无需说明详细原因
-- 重点关注客户入住时能够直观察觉的实质差异，忽略表述方式、重复描述等非实质性差异
-- 对于重复描述、表述顺序差异、同义词差异等，应判断为YES"""
-        else:
-            self.prompt_template = """你现在是一位普通酒店客户，请从真实客户体验的角度判断以下房型组合是否可以分为同一组。
-
-请对每组房型进行判断，模拟两种入住场景是否会产生客户投诉：
-- 场景1: 客户预订时看到房型A，实际入住时提供房型B
-- 场景2: 客户预订时看到房型B，实际入住时提供房型A
-
-分析步骤：
-1. **首先消除重复描述和冗余信息**：忽略重复词汇（如"2 double beds,2 double beds"视为"2 double beds"）
-2. **提取核心信息**：房间等级、床型、床数量、关键设施、景观等
-3. **按最低配置理解模糊描述**：对于不明确的描述，按最基础配置处理
-4. **评估or选择的风险**：描述中有"or"表示可能提供任意一种，需考虑最差情况
-
-判断原则（基于客户真实感知能力）：
-
-**客户能够明显感知的差异（会投诉）**：
-- 床数量明显差异：1张床 vs 2张床
-- 床型实质差异：单人床 vs 双人床 vs 大床（不包括同类型的尺寸微差）
-- 房间等级明显差异：standard vs deluxe vs suite
-- 关键设施差异：有厨房 vs 无厨房，有阳台 vs 无阳台
-- 景观实质差异：海景 vs 山景 vs 无景观
-
-**客户无法感知或不会投诉的差异（可以分组）**：
-- 重复描述差异：如"2 double beds,2 double beds" vs "2 double beds"
-- 表述顺序差异：如"standard triple room" vs "triple triple standard"
-- 语言差异：如"双人房" vs "double room"
-- 描述详细程度差异：如"room,2 double beds" vs "2 double beds"（实质都是双床房）
-- 床型尺寸微小差别：queen vs full（客户往往无法精确区分）
-- 房间面积的小幅差异
-- 装修时间等附加信息：newly renovated vs 普通
-
-**笼统描述的特殊处理**：
-- 如果一方描述笼统但另一方明确，需评估是否存在实质降级
-- 例如："superior double/twin" vs "superior room" - 前者有床型选择权，后者无
-- 但"room,2 double beds" vs "2 double beds" - 实质都提供2张双人床
-
-房型组合数据：
-{room_pairs}
-
-请按照以下格式返回结果，每组一行：
-组1: YES/NO
-组2: YES/NO
-组3: YES/NO
-...
-
-只需要返回YES（可以分组，不会产生投诉）或NO（不可以分组，可能产生投诉），重点关注客户入住时能够直观察觉的实质差异，忽略表述方式、重复描述等非实质性差异。对于重复描述、表述顺序差异、同义词差异等，应判断为YES。"""
+- 对于重复描述、表述顺序差异、同义词差异等，应判断为YES
+- 匹配可以激进一些，优先考虑客户的实际感知而非描述的字面差异
+"""
 
         logger.info("提示词模板设置完成")
 
@@ -284,6 +264,26 @@ class RoomGroupingProcessor:
             logger.error(f"批量结果解析失败: {str(e)}")
             return ['ERROR'] * expected_count, [''] * expected_count
 
+    def call_llm_for_single_grouping(self, spl_room_text: str, s_room_text: str, index: int) -> Tuple[int, str, str]:
+        """单个房间对的LLM调用"""
+        try:
+            # 构建单个房间对的prompt
+            room_pairs_text = f"组1:\n  房型A（供应商房型）: {spl_room_text}\n  房型B（标准房型）: {s_room_text}\n\n"
+            prompt = self.prompt_template.format(room_pairs=room_pairs_text)
+
+            messages = [HumanMessage(content=prompt)]
+            result = self.llm.invoke(messages)
+
+            llm_response = result.content if hasattr(
+                result, 'content') else str(result)
+            decisions, analyses = self._parse_batch_results(llm_response, 1)
+
+            return index, decisions[0], analyses[0] if analyses else ""
+
+        except Exception as e:
+            logger.error(f"单个LLM调用失败 (index {index}): {str(e)}")
+            return index, 'ERROR', ''
+
     def call_llm_for_batch_grouping(self, room_pairs: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
         """批量调用LLM判断房间是否能分组"""
         try:
@@ -300,7 +300,7 @@ class RoomGroupingProcessor:
             return ['ERROR'] * len(room_pairs), [''] * len(room_pairs)
 
     def process_csv_file(self, csv_file_path: str, similarity_threshold: float = 0.9,
-                         max_rows: int = 20, batch_size: int = 20) -> str:
+                         max_rows: int = 20, batch_size: int = 20, max_workers: int = 20) -> str:
         """处理CSV文件"""
         try:
             # 读取CSV文件
@@ -328,53 +328,81 @@ class RoomGroupingProcessor:
             if self.include_analysis:
                 filtered_df['llm_grouping_analysis'] = ''
 
-            # 批量处理
+            # 多线程批量处理
             total_count = len(filtered_df)
-            processed_count = 0
-            logger.info(f"开始批量处理，每批{batch_size}条数据...")
+            batch_count = (total_count + batch_size - 1) // batch_size  # 向上取整
+            logger.info(
+                f"开始多线程批量处理，总数据: {total_count}条，批次大小: {batch_size}，批次数量: {batch_count}，最大线程数: {max_workers}")
 
+            # 准备批次任务
+            batch_tasks = []
             for batch_start in range(0, total_count, batch_size):
                 batch_end = min(batch_start + batch_size, total_count)
                 batch_df = filtered_df.iloc[batch_start:batch_end]
 
-                try:
-                    # 准备批次数据
-                    room_pairs = []
-                    batch_indices = []
+                # 准备批次数据
+                room_pairs = []
+                batch_indices = []
+                for index, row in batch_df.iterrows():
+                    spl_room_text = str(row['spl_room_text'])
+                    s_room_text = str(row['s_room_text'])
+                    room_pairs.append((spl_room_text, s_room_text))
+                    batch_indices.append(index)
 
-                    for index, row in batch_df.iterrows():
-                        spl_room_text = str(row['spl_room_text'])
-                        s_room_text = str(row['s_room_text'])
-                        room_pairs.append((spl_room_text, s_room_text))
-                        batch_indices.append(index)
+                batch_tasks.append(
+                    (room_pairs, batch_indices, batch_start // batch_size + 1))
 
-                    # 调用LLM
-                    logger.info(f"处理批次 {batch_start+1}-{batch_end}...")
-                    batch_decisions, batch_analyses = self.call_llm_for_batch_grouping(
-                        room_pairs)
+            # 使用线程池处理批次，确保输出顺序与原始数据一致
+            results = {}  # 存储结果，key为index
+            processed_batches = 0
 
-                    # 更新数据
-                    for index, decision, analysis in zip(batch_indices, batch_decisions, batch_analyses):
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有批次任务
+                future_to_batch = {
+                    executor.submit(self.call_llm_for_batch_grouping, room_pairs): (batch_indices, batch_num)
+                    for room_pairs, batch_indices, batch_num in batch_tasks
+                }
+
+                # 处理完成的批次
+                for future in as_completed(future_to_batch):
+                    try:
+                        batch_indices, batch_num = future_to_batch[future]
+                        batch_decisions, batch_analyses = future.result()
+
+                        # 存储批次结果
+                        for idx, decision, analysis in zip(batch_indices, batch_decisions, batch_analyses):
+                            results[idx] = (decision, analysis)
+
+                        processed_batches += 1
+                        processed_count = processed_batches * batch_size
+                        if processed_count > total_count:
+                            processed_count = total_count
+
+                        logger.info(
+                            f"批次 {batch_num} 处理完成: {processed_batches}/{batch_count} ({processed_batches/batch_count*100:.1f}%)")
+
+                    except Exception as e:
+                        batch_indices, batch_num = future_to_batch[future]
+                        logger.error(f"批次 {batch_num} 处理失败: {str(e)}")
+                        # 对失败的批次中的所有索引设置ERROR
+                        for idx in batch_indices:
+                            results[idx] = ('ERROR', '')
+                        processed_batches += 1
+
+            # 按照原始数据顺序更新DataFrame，确保输出顺序一致
+            logger.info("按原始顺序更新结果...")
+            for index, row in filtered_df.iterrows():
+                if index in results:
+                    decision, analysis = results[index]
+                    filtered_df.at[index, 'llm_grouping_decision'] = decision
+                    if self.include_analysis:
                         filtered_df.at[index,
-                                       'llm_grouping_decision'] = decision
-                        if self.include_analysis:
-                            filtered_df.at[index,
-                                           'llm_grouping_analysis'] = analysis
-                        processed_count += 1
-
-                    logger.info(
-                        f"批次处理完成: {processed_count}/{total_count} ({processed_count/total_count*100:.1f}%)")
-                    time.sleep(1.0)  # 避免API限制
-
-                except Exception as e:
-                    logger.error(
-                        f"处理批次 {batch_start+1}-{batch_end} 时出错: {str(e)}")
-                    for index in batch_indices:
-                        filtered_df.at[index,
-                                       'llm_grouping_decision'] = 'ERROR'
-                        if self.include_analysis:
-                            filtered_df.at[index, 'llm_grouping_analysis'] = ''
-                        processed_count += 1
+                                       'llm_grouping_analysis'] = analysis
+                else:
+                    # 如果某个索引没有结果，设置为ERROR
+                    filtered_df.at[index, 'llm_grouping_decision'] = 'ERROR'
+                    if self.include_analysis:
+                        filtered_df.at[index, 'llm_grouping_analysis'] = ''
 
             # 保存结果
             output_file = csv_file_path.replace('.csv', '_with_grouping.csv')
@@ -411,13 +439,14 @@ def main():
     # 创建处理器（默认包含分析）
     processor = RoomGroupingProcessor(include_analysis=True)
 
-    print("开始处理20条数据（包含分析原因）...")
+    print("开始处理200条数据（包含分析原因，使用多线程处理）...")
     try:
         output_file = processor.process_csv_file(
             csv_file_path,
-            similarity_threshold=0.9,
-            max_rows=20,
-            batch_size=10
+            similarity_threshold=0.95,
+            max_rows=50000,
+            batch_size=20,
+            max_workers=10
         )
 
         print(f"处理完成，输出文件: {output_file}")

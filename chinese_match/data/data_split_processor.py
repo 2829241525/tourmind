@@ -228,7 +228,7 @@ def main():
     parser = argparse.ArgumentParser(description='数据处理工具')
 
     # 基本参数/home/maxon/disk2/roomMatch/room_match/chinese_match/data/room_group/room_group_train_fix_clean_filtered.csv
-    parser.add_argument('--input', type=str, default='room_group/room_group_train_fix_0711.csv',
+    parser.add_argument('--input', type=str, default='room_group/room_group_result.csv',
                         help='输入CSV文件路径 (默认: processed_merged_cleaned_filtered.csv)')
 
     # 标签平衡参数
@@ -244,11 +244,11 @@ def main():
                         help='验证集比例 (默认: 0.1)')
     parser.add_argument('--test-size', type=float, default=0.1,
                         help='测试集比例 (默认: 0.1)')
-    parser.add_argument('--train-file', type=str, default='room_group_train_fix_0711_train.csv',
+    parser.add_argument('--train-file', type=str, default='room_group_result_train.csv',
                         help='训练集输出路径 (默认: room_group_ps_train.csv)')
-    parser.add_argument('--valid-file', type=str, default='room_group_train_fix_0711_valid.csv',
+    parser.add_argument('--valid-file', type=str, default='room_group_result_valid.csv',
                         help='验证集输出路径 (默认: room_group_ps_valid.csv)')    
-    parser.add_argument('--test-file', type=str, default='room_group_train_fix_0711_test.csv',
+    parser.add_argument('--test-file', type=str, default='room_group_result_test.csv',
                         help='测试集输出路径 (默认: room_group_ps_test.csv)')
     parser.add_argument('--random-state', type=int, default=42,
                         help='随机种子 (默认: 42)')
