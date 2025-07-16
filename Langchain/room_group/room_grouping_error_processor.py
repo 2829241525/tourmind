@@ -116,6 +116,8 @@ class RoomGroupingErrorProcessor:
 - **床数量宽松处理**：在房型等级一致的前提下，床数量差异不应该成为拒绝分组的主要原因
 - **床大小和房间大小宽松处理**：客户不能够明显感知到床大小和空间大小，只要床大体在同一等级，床大小和房间大小差异不应该成为拒绝分组的主要原因。详细重审因空间大小和床大小差异而拒绝分组的原因。
 - **人数匹配优先**：如果两个房型都能满足相同的入住人数要求，应该优先考虑分组
+- **对于餐食（早餐，晚餐等），售后政策（退款等）可以忽略差异**
+- **在床型有描述且一致，或床型未描述的情况下，人数描述的差异可以忽略**
 
 **针对常见误判的修正：**
 - 如果之前因为"床数量不匹配"而判断为NO，请重新检查是否存在重复描述
@@ -233,7 +235,7 @@ class RoomGroupingErrorProcessor:
 
     def process_no_decisions_csv(self, csv_file_path: str, max_rows: int = None,
                                  batch_size: int = 20, max_workers: int = 20) -> str:
-        """专门处理CSV文件中llm_grouping_decision为NO的数据进行重新审核"""
+        """专门处理CSV文件中llm_grouping_decision为NO的数据进行重新审核 - 块写入模式"""
         try:
             # 读取CSV文件
             logger.info(f"开始读取CSV文件进行NO判断重新审核: {csv_file_path}")
@@ -254,7 +256,7 @@ class RoomGroupingErrorProcessor:
                 filtered_df = filtered_df.head(max_rows)
                 logger.info(f"限制处理数量为: {max_rows} 行")
 
-            # 重置索引以确保连续性，避免多线程索引错位
+            # 重置索引以确保连续性
             filtered_df = filtered_df.reset_index(drop=True)
             logger.info("已重置DataFrame索引以确保数据一致性")
 
@@ -263,124 +265,164 @@ class RoomGroupingErrorProcessor:
             if self.include_analysis:
                 filtered_df['llm_review_analysis'] = ''
 
-            # 多线程批量处理
-            total_count = len(filtered_df)
-            batch_count = (total_count + batch_size - 1) // batch_size  # 向上取整
-            logger.info(
-                f"开始多线程批量重新审核，总数据: {total_count}条，批次大小: {batch_size}，批次数量: {batch_count}，最大线程数: {max_workers}")
-
-            # 准备批次任务
-            batch_tasks = []
-            for batch_start in range(0, total_count, batch_size):
-                batch_end = min(batch_start + batch_size, total_count)
-
-                # 使用iloc确保连续索引访问
-                room_pairs = []
-                batch_indices = []
-                for i in range(batch_start, batch_end):
-                    row = filtered_df.iloc[i]
-                    spl_room_text = str(row['spl_room_text'])
-                    s_room_text = str(row['s_room_text'])
-                    room_pairs.append((spl_room_text, s_room_text))
-                    batch_indices.append(i)  # 使用连续的索引
-
-                batch_tasks.append(
-                    (room_pairs, batch_indices, batch_start // batch_size + 1))
-
-            # 使用线程池处理批次
-            results = {}  # 存储结果，key为index
-            processed_batches = 0
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 提交所有批次任务，使用重新审核的方法
-                future_to_batch = {
-                    executor.submit(self.call_llm_for_no_review_batch, room_pairs): (batch_indices, batch_num)
-                    for room_pairs, batch_indices, batch_num in batch_tasks
-                }
-
-                # 处理完成的批次
-                for future in as_completed(future_to_batch):
-                    try:
-                        batch_indices, batch_num = future_to_batch[future]
-                        batch_decisions, batch_analyses = future.result()
-
-                        # 存储批次结果 - 确保数据对应正确
-                        if len(batch_decisions) != len(batch_indices):
-                            logger.warning(
-                                f"批次 {batch_num} 返回结果数量不匹配: 期望{len(batch_indices)}，实际{len(batch_decisions)}")
-
-                        # 详细记录每个结果的映射关系
-                        logger.info(f"批次 {batch_num} 结果映射:")
-                        for i, (idx, decision, analysis) in enumerate(zip(batch_indices, batch_decisions, batch_analyses)):
-                            # 获取对应的房型数据用于验证
-                            if idx < len(filtered_df):
-                                row = filtered_df.iloc[idx]
-                                spl_text = str(row['spl_room_text'])[:40]
-                                s_text = str(row['s_room_text'])[:40]
-                                logger.info(
-                                    f"  索引{idx}(组{i+1}): '{spl_text}...' vs '{s_text}...' -> {decision}")
-
-                            results[idx] = (decision, analysis)
-
-                        processed_batches += 1
-                        processed_count = processed_batches * batch_size
-                        if processed_count > total_count:
-                            processed_count = total_count
-
-                        logger.info(
-                            f"重新审核批次 {batch_num} 处理完成: {processed_batches}/{batch_count} ({processed_batches/batch_count*100:.1f}%)")
-
-                    except Exception as e:
-                        batch_indices, batch_num = future_to_batch[future]
-                        logger.error(f"重新审核批次 {batch_num} 处理失败: {str(e)}")
-                        # 对失败的批次中的所有索引设置ERROR
-                        for idx in batch_indices:
-                            results[idx] = ('ERROR', '')
-                        processed_batches += 1
-
-            # 按照连续索引顺序更新DataFrame
-            logger.info("按连续索引顺序更新重新审核结果...")
-            for i in range(len(filtered_df)):
-                if i in results:
-                    decision, analysis = results[i]
-                    filtered_df.at[i, 'llm_review_decision'] = decision
-                    if self.include_analysis:
-                        filtered_df.at[i, 'llm_review_analysis'] = analysis
-                else:
-                    # 如果某个索引没有结果，设置为ERROR
-                    filtered_df.at[i, 'llm_review_decision'] = 'ERROR'
-                    if self.include_analysis:
-                        filtered_df.at[i, 'llm_review_analysis'] = ''
-
-            # 保存结果
+            # 准备输出文件
             output_file = csv_file_path.replace(
                 '.csv', '_no_review_results.csv')
-            filtered_df.to_csv(output_file, index=False, encoding='utf-8')
-            logger.info(f"NO判断重新审核完成，结果已保存到: {output_file}")
 
-            # 统计结果
-            yes_count = len(
-                filtered_df[filtered_df['llm_review_decision'] == 'YES'])
-            no_count = len(
-                filtered_df[filtered_df['llm_review_decision'] == 'NO'])
-            error_count = len(
-                filtered_df[filtered_df['llm_review_decision'] == 'ERROR'])
-            unknown_count = len(
-                filtered_df[filtered_df['llm_review_decision'] == 'UNKNOWN'])
+            # 写入CSV头部（如果文件不存在）
+            if not os.path.exists(output_file):
+                # 写入空的DataFrame头部
+                empty_df = filtered_df.iloc[0:0].copy()  # 只有列名，没有数据
+                empty_df.to_csv(output_file, index=False, encoding='utf-8')
+                logger.info(f"创建输出文件并写入CSV头部: {output_file}")
 
+            # 多线程块处理
+            total_count = len(filtered_df)
+            batch_count = (total_count + batch_size - 1) // batch_size
+            logger.info(
+                f"开始多线程块处理模式，总数据: {total_count}条，块大小: {batch_size}，块数量: {batch_count}，最大线程数: {max_workers}")
+
+            # 准备块任务
+            chunk_tasks = []
+            for chunk_start in range(0, total_count, batch_size):
+                chunk_end = min(chunk_start + batch_size, total_count)
+
+                # 提取当前块的完整数据
+                chunk_df = filtered_df.iloc[chunk_start:chunk_end].copy()
+                chunk_num = chunk_start // batch_size + 1
+
+                chunk_tasks.append((chunk_df, chunk_num))
+
+            # 使用线程池处理块，并使用文件锁确保写入安全
+            file_lock = threading.Lock()
+            processed_chunks = 0
+            total_stats = {'yes': 0, 'no': 0, 'error': 0, 'unknown': 0}
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有块任务
+                future_to_chunk = {
+                    executor.submit(self.process_and_write_chunk, chunk_df, chunk_num, output_file, file_lock): chunk_num
+                    for chunk_df, chunk_num in chunk_tasks
+                }
+
+                # 处理完成的块
+                for future in as_completed(future_to_chunk):
+                    try:
+                        chunk_num = future_to_chunk[future]
+                        chunk_stats = future.result()
+
+                        # 累计统计信息
+                        for key in total_stats:
+                            total_stats[key] += chunk_stats.get(key, 0)
+
+                        processed_chunks += 1
+                        progress = (processed_chunks / batch_count) * 100
+                        logger.info(
+                            f"块 {chunk_num} 处理并写入完成: {processed_chunks}/{batch_count} ({progress:.1f}%)")
+
+                    except Exception as e:
+                        chunk_num = future_to_chunk[future]
+                        logger.error(f"块 {chunk_num} 处理失败: {str(e)}")
+                        processed_chunks += 1
+
+            logger.info(f"所有块处理完成，结果已分块写入: {output_file}")
+
+            # 统计最终结果
             logger.info("重新审核结果统计:")
-            logger.info(f"  原始NO数据总数: {len(filtered_df)}")
-            logger.info(f"  重新审核后YES (改为可以分组): {yes_count}")
-            logger.info(f"  重新审核后NO (仍然不可分组): {no_count}")
-            logger.info(f"  ERROR (处理错误): {error_count}")
-            logger.info(f"  UNKNOWN (未知): {unknown_count}")
-            logger.info(f"  误判率: {yes_count/len(filtered_df)*100:.1f}%")
+            logger.info(f"  原始NO数据总数: {total_count}")
+            logger.info(f"  重新审核后YES (改为可以分组): {total_stats['yes']}")
+            logger.info(f"  重新审核后NO (仍然不可分组): {total_stats['no']}")
+            logger.info(f"  ERROR (处理错误): {total_stats['error']}")
+            logger.info(f"  UNKNOWN (未知): {total_stats['unknown']}")
+            if total_count > 0:
+                logger.info(
+                    f"  误判率: {total_stats['yes']/total_count*100:.1f}%")
 
             return output_file
 
         except Exception as e:
             logger.error(f"处理NO判断重新审核失败: {str(e)}")
             raise
+
+    def process_and_write_chunk(self, chunk_df: pd.DataFrame, chunk_num: int, output_file: str, file_lock: threading.Lock) -> Dict[str, int]:
+        """处理一个数据块并立即写入CSV文件"""
+        try:
+            logger.info(f"开始处理块 {chunk_num}，包含 {len(chunk_df)} 条数据")
+
+            # 准备房型对数据
+            room_pairs = []
+            for _, row in chunk_df.iterrows():
+                spl_room_text = str(row['spl_room_text'])
+                s_room_text = str(row['s_room_text'])
+                room_pairs.append((spl_room_text, s_room_text))
+
+            # 调用LLM处理这个块
+            batch_decisions, batch_analyses = self.call_llm_for_no_review_batch(
+                room_pairs)
+
+            # 验证结果数量匹配
+            if len(batch_decisions) != len(chunk_df):
+                logger.warning(
+                    f"块 {chunk_num} 结果数量不匹配: 期望{len(chunk_df)}，实际{len(batch_decisions)}")
+                # 补齐缺失的结果
+                while len(batch_decisions) < len(chunk_df):
+                    batch_decisions.append('ERROR')
+                    batch_analyses.append('')
+
+            # 更新chunk数据框
+            chunk_df_copy = chunk_df.copy()
+            for i, (decision, analysis) in enumerate(zip(batch_decisions, batch_analyses)):
+                if i < len(chunk_df_copy):
+                    chunk_df_copy.iloc[i, chunk_df_copy.columns.get_loc(
+                        'llm_review_decision')] = decision
+                    if self.include_analysis:
+                        chunk_df_copy.iloc[i, chunk_df_copy.columns.get_loc(
+                            'llm_review_analysis')] = analysis
+
+            # 使用文件锁安全写入CSV文件
+            with file_lock:
+                # 追加写入，不包含头部
+                chunk_df_copy.to_csv(
+                    output_file, mode='a', header=False, index=False, encoding='utf-8')
+                logger.info(f"块 {chunk_num} 已安全写入CSV文件")
+
+            # 统计本块结果
+            stats = {
+                'yes': chunk_df_copy['llm_review_decision'].value_counts().get('YES', 0),
+                'no': chunk_df_copy['llm_review_decision'].value_counts().get('NO', 0),
+                'error': chunk_df_copy['llm_review_decision'].value_counts().get('ERROR', 0),
+                'unknown': chunk_df_copy['llm_review_decision'].value_counts().get('UNKNOWN', 0)
+            }
+
+            logger.info(
+                f"块 {chunk_num} 处理完成 - YES: {stats['yes']}, NO: {stats['no']}, ERROR: {stats['error']}, UNKNOWN: {stats['unknown']}")
+            return stats
+
+        except Exception as e:
+            logger.error(f"处理块 {chunk_num} 失败: {str(e)}")
+            # 返回错误统计
+            error_stats = {
+                'yes': 0,
+                'no': 0,
+                'error': len(chunk_df),
+                'unknown': 0
+            }
+
+            # 尝试写入错误结果
+            try:
+                chunk_df_copy = chunk_df.copy()
+                chunk_df_copy['llm_review_decision'] = 'ERROR'
+                if self.include_analysis:
+                    chunk_df_copy['llm_review_analysis'] = f'处理失败: {str(e)}'
+
+                with file_lock:
+                    chunk_df_copy.to_csv(
+                        output_file, mode='a', header=False, index=False, encoding='utf-8')
+                    logger.info(f"块 {chunk_num} 错误结果已写入CSV文件")
+            except Exception as write_error:
+                logger.error(f"写入块 {chunk_num} 错误结果失败: {str(write_error)}")
+
+            return error_stats
 
     def call_llm_for_no_review_batch(self, room_pairs: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
         """专门用于重新审核NO判断的批量LLM调用"""
@@ -449,12 +491,14 @@ def main():
 
         print(f"重新审核完成，输出文件: {output_file}")
 
+        # 读取分块写入的最终结果进行统计显示
+        print("\n=== 读取分块写入的最终结果 ===")
+        final_df = pd.read_csv(output_file)
+        print(f"最终结果文件包含 {len(final_df)} 条记录")
+
         # 显示结果示例
         print("\n=== 重新审核结果示例 ===")
-        df = pd.read_csv(output_file)
-
-        # 显示原始NO数据的重新审核结果
-        for i, row in df.head(10).iterrows():
+        for i, row in final_df.head(10).iterrows():
             print(f"数据{i+1}:")
             print(f"  房型A: {row['spl_room_text']}")
             print(f"  房型B: {row['s_room_text']}")
@@ -467,17 +511,28 @@ def main():
             print("-" * 80)
 
         # 统计改变的情况
-        changed_to_yes = len(df[df['llm_review_decision'] == 'YES'])
-        still_no = len(df[df['llm_review_decision'] == 'NO'])
-        total_reviewed = len(df)
+        changed_to_yes = len(
+            final_df[final_df['llm_review_decision'] == 'YES'])
+        still_no = len(final_df[final_df['llm_review_decision'] == 'NO'])
+        error_count = len(final_df[final_df['llm_review_decision'] == 'ERROR'])
+        unknown_count = len(
+            final_df[final_df['llm_review_decision'] == 'UNKNOWN'])
+        total_reviewed = len(final_df)
 
-        print(f"\n=== 审核统计结果 ===")
+        print(f"\n=== 最终审核统计结果 ===")
         print(f"总共重新审核的NO数据: {total_reviewed} 条")
         print(
             f"改判为YES (可以分组): {changed_to_yes} 条 ({changed_to_yes/total_reviewed*100:.1f}%)")
         print(
             f"仍然为NO (不可分组): {still_no} 条 ({still_no/total_reviewed*100:.1f}%)")
-        print(f"可能的误判率: {changed_to_yes/total_reviewed*100:.1f}%")
+        print(
+            f"处理错误 (ERROR): {error_count} 条 ({error_count/total_reviewed*100:.1f}%)")
+        print(
+            f"未知状态 (UNKNOWN): {unknown_count} 条 ({unknown_count/total_reviewed*100:.1f}%)")
+        if total_reviewed > 0:
+            print(f"可能的误判率: {changed_to_yes/total_reviewed*100:.1f}%")
+            print(
+                f"成功处理率: {(changed_to_yes + still_no)/total_reviewed*100:.1f}%")
 
     except Exception as e:
         print(f"重新审核失败: {str(e)}")

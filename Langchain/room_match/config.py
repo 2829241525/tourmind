@@ -9,15 +9,26 @@ import os
 import logging
 
 # ===== 全局配置 =====
-PROJECT_ROOT = "/Users/xiemingxuan/B-code/Langchain"
+# 动态获取项目根目录
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 # 确保目录存在
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)
-os.makedirs(MODELS_DIR, exist_ok=True)
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+except PermissionError:
+    # 如果无法创建目录，使用当前目录
+    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+    LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+    MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
 
 # ===== 日志配置 =====
 LOG_CONFIG = {
