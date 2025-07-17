@@ -111,7 +111,7 @@ class HotelRoomExtractor:
 
         # 更新Referer中的酒店ID
         headers = self.DEFAULT_API_CONFIG["default_headers"].copy()
-        headers['Referer'] = f'http://erp.tourmind.cn/roomtypemapping/{hotel_id}?supplierId=79&brt=tourmind&loadMaster=true'
+        headers['Referer'] = f'http://erp.tourmind.cn/roomtypemapping/{hotel_id}?supplierId=0&brt=tourmind&loadMaster=true'
 
         return full_url, headers
 
@@ -134,7 +134,7 @@ class HotelRoomExtractor:
                 try:
                     response = requests.request(
                         method=method, url=url, headers=default_headers,
-                        verify=False, timeout=120, **kwargs)  # 增加超时时间到60秒
+                        verify=False, timeout=60, **kwargs)  # 增加超时时间到60秒
 
                     response_data = {
                         "status_code": response.status_code,
@@ -406,7 +406,7 @@ def main():
             csv_file_path=csv_file,
             output_dir="output",
             start_index=0,
-            end_index=200,  # 处理前20个酒店
+            end_index=2000,  # 处理前20个酒店
             delay_seconds=1.0  # 每个请求间隔1秒，增加等待时间
         )
 

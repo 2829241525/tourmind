@@ -10,6 +10,7 @@ import logging
 import torch
 import json
 from trainer import DeBERTaTrainer, print_gpu_memory, clear_gpu_memory
+from distributed_trainer import create_distributed_trainer, print_distributed_info
 
 # 设置tokenizer并行性
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -32,11 +33,24 @@ def main():
     parser = argparse.ArgumentParser(description='训练DeBERTa模型')
     # config_mdeberta   config_mdeberta_room_group
     parser.add_argument(
-        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/chinese_match/config/config_mdeberta.json", help='配置文件路径')
+        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/chinese_match/config/config_mdeberta_room_group.json", help='配置文件路径')
+    parser.add_argument('--enable-distributed',
+                        action='store_true', help='启用分布式训练')
+    parser.add_argument('--gpu-config', type=str,
+                        default='auto', help='GPU配置 (auto, 0,1,2, 0-2等)')
+    parser.add_argument('--max-gpus', type=int, default=None, help='最大使用GPU数量')
     args = parser.parse_args()
 
-    # 创建训练器，并传递配置覆盖
-    trainer = DeBERTaTrainer(args.config)
+    # 打印分布式训练信息
+    print_distributed_info()
+
+    # 创建训练器
+    trainer = DeBERTaTrainer(
+        args.config,
+        enable_distributed=args.enable_distributed,
+        gpu_config=args.gpu_config,
+        max_gpus=args.max_gpus
+    )
 
     # 开始训练
     try:
