@@ -112,12 +112,6 @@ class MDeBERTaPredictor:
             with torch.no_grad():
                 outputs = self.model(**encoded)
 
-                # 检查并处理NaN值
-                if torch.isnan(outputs.logits).any():
-                    outputs.logits = torch.nan_to_num(
-                        outputs.logits, nan=-10.0)
-                    logger.warning("检测到NaN值，已替换为安全值")
-
                 # 获取正类的logits得分
                 batch_logits = outputs.logits[:, 1]
                 # 确保返回的是float32类型
@@ -162,7 +156,7 @@ class GroupSimilarityProcessor:
         """组合房间名称和床型描述"""
         room_name = str(room_name) if pd.notna(room_name) else ""
         bed_type_desc = str(bed_type_desc) if pd.notna(bed_type_desc) else ""
-        return f"{room_name} {bed_type_desc}".strip()
+        return f"{room_name} {bed_type_desc}".strip().lower()
 
     def process_group_of_two(self, group_data):
         """处理包含2个房间的分组"""
@@ -274,16 +268,14 @@ class GroupSimilarityProcessor:
                 for room_idx in cluster:
                     mark_col[room_idx] = cluster_id
 
-                    # 计算与同cluster内其他房间的相似度
-                    if len(cluster) > 1:
-                        cluster_similarities = []
-                        for other_idx in cluster:
-                            if room_idx != other_idx:
-                                sim = similarity_matrix.get(
-                                    (room_idx, other_idx), 0.0)
-                                cluster_similarities.append(f"{sim:.4f}")
-                        similarity_col[room_idx] = ",".join(
-                            cluster_similarities)
+            # 为每个房间计算与其他所有房间的相似度（不管是否在同一cluster）
+            for i in range(group_size):
+                all_similarities = []
+                for j in range(group_size):
+                    if i != j:
+                        sim = similarity_matrix.get((i, j), 0.0)
+                        all_similarities.append(f"{sim:.4f}")
+                similarity_col[i] = ",".join(all_similarities)
 
         # 为每一行添加标记和相似度
         for i, (_, row) in enumerate(group_data.iterrows()):

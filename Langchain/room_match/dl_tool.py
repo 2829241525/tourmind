@@ -29,7 +29,6 @@ DL_MATCH_CONFIG = {
     },
     "token": "tourmind_room_match",
     "timeout": 30,
-    "csv_output_dir": "/Users/xiemingxuan/B-code/Langchain/room_match/dl_csv",
     "csv_filename_prefix": "room_similarity_"
 }
 

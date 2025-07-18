@@ -41,7 +41,7 @@ LOG_CONFIG = {
 
 # ===== 房型匹配配置 =====
 ROOM_MATCHING_CONFIG = {
-    'matching_method': 'agent',  # 可选: 'llm' 或 'agent'
+    'matching_method': 'llm',  # 可选: 'llm' 或 'agent'
     'enable_dl_matching': False,  # 是否启用深度学习匹配
     'llm_timeout': 300,  # LLM调用超时时间（秒），从180增加到300
     'agent_max_iterations': 10,  # Agent最大迭代次数，从3增加到10

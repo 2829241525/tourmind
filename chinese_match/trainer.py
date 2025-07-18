@@ -22,7 +22,6 @@ from models.model import create_model
 from models.loss import create_loss_fn
 from data.dataset import RoomMatchValidationDataset
 from utils.logger import TrainingLogger
-from distributed_trainer import DistributedTrainer, create_distributed_trainer, print_distributed_info
 
 # 配置日志记录
 logging.basicConfig(
@@ -63,16 +62,13 @@ def clear_gpu_memory():
 class DeBERTaTrainer:
     """DeBERTa模型训练器"""
 
-    def __init__(self, config_path: str, config_override=None, enable_distributed: bool = False, gpu_config: str = "auto", max_gpus: int = None):
+    def __init__(self, config_path: str, config_override=None):
         """
         初始化训练器
 
         Args:
             config_path: 配置文件路径
             config_override: 覆盖配置文件的参数字典
-            enable_distributed: 是否启用分布式训练
-            gpu_config: GPU配置
-            max_gpus: 最大GPU数量
         """
         # 加载配置文件
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -104,23 +100,17 @@ class DeBERTaTrainer:
             self.base_dir, self.config['save_dir'])
         os.makedirs(self.config['save_dir'], exist_ok=True)
 
-        # 分布式训练设置
-        self.enable_distributed = enable_distributed
-        self.gpu_config = gpu_config
-        self.max_gpus = max_gpus
-        self.rank = 0
-        self.world_size = 1
-
-        # 打印分布式训练信息
-        print_distributed_info()
-
-        # 指定使用 GPU（分布式训练时会在setup_distributed中重新设置）
-        if enable_distributed:
-            self.device = torch.device(
-                'cuda:0' if torch.cuda.is_available() else 'cpu')
+        # 指定使用 GPU
+        # 支持分布式训练时的设备选择
+        if torch.distributed.is_initialized():
+            # 分布式训练模式，使用当前进程对应的GPU
+            local_rank = torch.distributed.get_rank()
+            self.device = torch.device(f'cuda:{local_rank}')
         else:
+            # 单GPU训练模式，使用配置指定的GPU或默认GPU
+            gpu_id = self.config.get('gpu_id', 1)
             self.device = torch.device(
-                'cuda:1' if torch.cuda.is_available() else 'cpu')
+                f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
         logger.info(f"使用设备: {self.device}")
 
         # 初始化日志记录器
@@ -164,9 +154,6 @@ class DeBERTaTrainer:
 
         # 将模型移动到设备上
         self.model.to(self.device)
-
-        # 如果是分布式训练，包装模型（在train方法中处理）
-        # 这里不包装，因为rank和world_size在train方法中才设置
 
         # 使用模型的内置损失函数
         self.criterion = None
@@ -683,104 +670,36 @@ class DeBERTaTrainer:
             except Exception as e:
                 logger.warning(f"删除检查点失败: {checkpoint}, 错误: {str(e)}")
 
-    def train(self, rank: int = 0, world_size: int = 1):
+    def train(self):
         """
         训练模型
-
-        Args:
-            rank: 当前进程rank（分布式训练时使用）
-            world_size: 总进程数（分布式训练时使用）
         """
-        # 设置分布式参数
-        if self.enable_distributed:
-            self.rank = rank
-            self.world_size = world_size
-            self.device = torch.device(
-                f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
-
-            # 重新设置模型设备
-            if hasattr(self.model, 'module'):
-                self.model.module.to(self.device)
-            else:
-                self.model.to(self.device)
-
-            # 如果是分布式训练，包装模型
-            if self.world_size > 1:
-                from torch.nn.parallel import DistributedDataParallel as DDP
-                self.model = DDP(self.model, device_ids=[
-                                 rank], output_device=rank)
-
         # 使用验证数据集
         train_dataset = RoomMatchValidationDataset(
             self.config['train_file'])
         valid_dataset = RoomMatchValidationDataset(
             self.config['valid_file'])
 
-        if self.rank == 0:  # 只在主进程输出日志
-            logger.info(f"加载了 {len(train_dataset)} 个训练样本")
-            logger.info(f"加载了 {len(valid_dataset)} 个验证样本")
+        logger.info(f"加载了 {len(train_dataset)} 个训练样本")
+        logger.info(f"加载了 {len(valid_dataset)} 个验证样本")
 
-        # 创建数据加载器
-        batch_size = self.config.get('batch_size', 64)
-
-        if self.enable_distributed and self.world_size > 1:
-            from torch.utils.data import DistributedSampler
-
-            # 分布式训练数据加载器
-            train_sampler = DistributedSampler(
-                train_dataset,
-                num_replicas=self.world_size,
-                rank=self.rank,
-                shuffle=True
-            )
-            valid_sampler = DistributedSampler(
-                valid_dataset,
-                num_replicas=self.world_size,
-                rank=self.rank,
-                shuffle=False
-            )
-
-            # 调整批次大小
-            per_gpu_batch_size = batch_size // self.world_size
-
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=per_gpu_batch_size,
-                sampler=train_sampler,
-                num_workers=self.config.get('num_workers', 4),
-                pin_memory=self.config.get('pin_memory', True)
-            )
-            valid_loader = DataLoader(
-                valid_dataset,
-                batch_size=per_gpu_batch_size * 2,
-                sampler=valid_sampler,
-                num_workers=self.config.get('num_workers', 4),
-                pin_memory=self.config.get('pin_memory', True)
-            )
-        else:
-            # 单GPU训练数据加载器
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=self.config.get('num_workers', 4),
-                pin_memory=self.config.get('pin_memory', True)
-            )
-            valid_loader = DataLoader(
-                valid_dataset,
-                batch_size=batch_size * 2,
-                shuffle=True,
-                num_workers=self.config.get('num_workers', 4),
-                pin_memory=self.config.get('pin_memory', True)
-            )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config.get('batch_size', 64),
+            shuffle=True,
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=self.config.get('pin_memory', True)
+        )
+        valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=self.config.get('batch_size', 64) * 2,
+            shuffle=True,
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=self.config.get('pin_memory', True)
+        )
 
         # 创建学习率调度器
-        # 分布式训练时需要考虑总批次大小
-        effective_batch_size = self.config.get('batch_size', 64)
-        if self.enable_distributed and self.world_size > 1:
-            effective_batch_size = effective_batch_size * self.world_size
-
-        total_steps = len(train_dataset) // effective_batch_size
+        total_steps = len(train_dataset) // self.config.get('batch_size', 64)
         total_steps = total_steps // self.config.get(
             'gradient_accumulation_steps', 1)
         total_steps = total_steps * self.config.get('num_epochs', 5)
@@ -851,35 +770,29 @@ class DeBERTaTrainer:
         save_dir = Path(self.config['save_dir'])
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.rank == 0:  # 只在主进程输出日志
-            logger.info("开始训练...")
-            logger.info(
-                f"混合精度训练(FP16): {'启用' if self.config.get('fp16', False) else '禁用'}")
-            logger.info(f"总训练步数: {num_training_steps}")
+        logger.info("开始训练...")
+        logger.info(
+            f"混合精度训练(FP16): {'启用' if self.config.get('fp16', False) else '禁用'}")
+        logger.info(f"总训练步数: {num_training_steps}")
 
-            # 输出warmup状态
-            enable_warmup = self.config.get('scheduler', {}).get(
-                'enable_warmup', True) if 'scheduler' in self.config else self.config.get('enable_warmup', True)
-            if enable_warmup:
-                logger.info(f"预热设置: 启用，预热步数: {num_warmup_steps}")
-                if num_warmup_steps > 0:
-                    warmup_ratio = num_warmup_steps / \
-                        num_training_steps if num_training_steps > 0 else 0
-                    logger.info(f"预热比例: {warmup_ratio:.2%}")
-            else:
-                logger.info("预热设置: 禁用")
+        # 输出warmup状态
+        enable_warmup = self.config.get('scheduler', {}).get(
+            'enable_warmup', True) if 'scheduler' in self.config else self.config.get('enable_warmup', True)
+        if enable_warmup:
+            logger.info(f"预热设置: 启用，预热步数: {num_warmup_steps}")
+            if num_warmup_steps > 0:
+                warmup_ratio = num_warmup_steps / \
+                    num_training_steps if num_training_steps > 0 else 0
+                logger.info(f"预热比例: {warmup_ratio:.2%}")
+        else:
+            logger.info("预热设置: 禁用")
 
-            logger.info(f"数据集大小: {len(train_dataset)}")
-            logger.info(f"批次大小: {self.config.get('batch_size', 64)}")
-            logger.info(
-                f"梯度累积步数: {self.config.get('gradient_accumulation_steps', 1)}")
-            logger.info(
-                f"有效批次大小: {effective_batch_size * self.config.get('gradient_accumulation_steps', 1)}")
-
-            if self.enable_distributed and self.world_size > 1:
-                logger.info(f"分布式训练: 使用 {self.world_size} 个GPU")
-                logger.info(
-                    f"每个GPU批次大小: {effective_batch_size // self.world_size}")
+        logger.info(f"数据集大小: {len(train_dataset)}")
+        logger.info(f"批次大小: {self.config.get('batch_size', 64)}")
+        logger.info(
+            f"梯度累积步数: {self.config.get('gradient_accumulation_steps', 1)}")
+        logger.info(
+            f"有效批次大小: {self.config.get('batch_size', 64) * self.config.get('gradient_accumulation_steps', 1)}")
 
         # 计算每个epoch验证的频率
         eval_steps = self.config.get('eval_steps', 1000)
@@ -894,10 +807,6 @@ class DeBERTaTrainer:
         for epoch in range(start_epoch, self.config.get('num_epochs', 5)):
             self.current_epoch = epoch
 
-            # 分布式训练时设置epoch
-            if self.enable_distributed and self.world_size > 1:
-                train_loader.sampler.set_epoch(epoch)
-
             # 训练
             train_loss = self.train_epoch(train_loader)
 
@@ -908,75 +817,66 @@ class DeBERTaTrainer:
             # 每个epoch结束后完整评估
             valid_loss = self.evaluate(valid_loader)
 
-            # 只在主进程记录和保存
-            if self.rank == 0:
-                # 记录验证loss
-                self.logger.log_validation(valid_loss)
+            # 记录验证loss
+            self.logger.log_validation(valid_loss)
 
-                # 保存训练历史
-                self.logger._save_history()
+            # 保存训练历史
+            self.logger._save_history()
 
-                logger.info(f'Epoch {epoch+1}:')
-                logger.info(f'  训练损失: {train_loss:.4f}')
-                logger.info(f'  验证损失: {valid_loss:.4f}')
+            logger.info(f'Epoch {epoch+1}:')
+            logger.info(f'  训练损失: {train_loss:.4f}')
+            logger.info(f'  验证损失: {valid_loss:.4f}')
 
-                # 保存检查点（根据配置选择轻量级或完整检查点）
-                light_checkpoint = self.config.get('light_checkpoint', False)
-                self.save_checkpoint(epoch, valid_loss, light_checkpoint)
+            # 保存检查点（根据配置选择轻量级或完整检查点）
+            light_checkpoint = self.config.get('light_checkpoint', False)
+            self.save_checkpoint(epoch, valid_loss, light_checkpoint)
 
-                # 保存最佳模型
-                if valid_loss < self.best_valid_loss:
-                    self.best_valid_loss = valid_loss
-                    early_stopping_counter = 0
+            # 保存最佳模型
+            if valid_loss < self.best_valid_loss:
+                self.best_valid_loss = valid_loss
+                early_stopping_counter = 0
 
-                    # 保存模型
-                    best_model_path = save_dir / 'best_model'
-                    best_model_path.mkdir(parents=True, exist_ok=True)
-                    if hasattr(self.model, 'module'):
-                        # 分布式训练时保存模型
-                        self.model.module.save_pretrained(best_model_path)
-                    elif hasattr(self.model, 'model'):
-                        # 如果是封装的模型，保存内部的transformers模型
-                        self.model.model.save_pretrained(best_model_path)
-                    else:
-                        # 如果是直接的transformers模型，直接保存
-                        self.model.save_pretrained(best_model_path)
-
-                    self.tokenizer.save_pretrained(best_model_path)
-                    logger.info(f'  保存最佳模型，损失: {self.best_valid_loss:.4f}')
+                # 保存模型
+                best_model_path = save_dir / 'best_model'
+                best_model_path.mkdir(parents=True, exist_ok=True)
+                if hasattr(self.model, 'model'):
+                    # 如果是封装的模型，保存内部的transformers模型
+                    self.model.model.save_pretrained(best_model_path)
                 else:
-                    logger.info(
-                        f'self.best_valid_loss: {self.best_valid_loss:.4f}，valid_loss: {valid_loss:.4f}')
+                    # 如果是直接的transformers模型，直接保存
+                    self.model.save_pretrained(best_model_path)
 
-                    early_stopping_counter += 1
-                    logger.info(
-                        f'  验证损失未改善，早停计数器: {early_stopping_counter}/{self.early_stopping_patience}')
-
-                # 早停检查
-                if early_stopping_counter >= self.early_stopping_patience:
-                    logger.info(f'早停触发，在第 {epoch+1} 轮后停止训练')
-                    break
-
-                # 显示当前学习率
-                if hasattr(self, 'scheduler') and self.scheduler is not None:
-                    current_lr = self.scheduler.get_last_lr()[0]
-                else:
-                    current_lr = self.optimizer.param_groups[0]['lr']
-                logger.info(f'  当前学习率: {current_lr:.2e}')
-
-        # 训练结束后保存最终模型（只在主进程）
-        if self.rank == 0:
-            final_model_path = save_dir / 'final_model'
-            final_model_path.mkdir(parents=True, exist_ok=True)
-            if hasattr(self.model, 'module'):
-                # 分布式训练时保存模型
-                self.model.module.save_pretrained(final_model_path)
-            elif hasattr(self.model, 'model'):
-                # 如果是封装的模型，保存内部的transformers模型
-                self.model.model.save_pretrained(final_model_path)
+                self.tokenizer.save_pretrained(best_model_path)
+                logger.info(f'  保存最佳模型，损失: {self.best_valid_loss:.4f}')
             else:
-                # 如果是直接的transformers模型，直接保存
-                self.model.save_pretrained(final_model_path)
+                logger.info(
+                    f'self.best_valid_loss: {self.best_valid_loss:.4f}，valid_loss: {valid_loss:.4f}')
 
-            self.tokenizer.save_pretrained(final_model_path)
-            logger.info(f'训练完成，保存最终模型到: {final_model_path}')
+                early_stopping_counter += 1
+                logger.info(
+                    f'  验证损失未改善，早停计数器: {early_stopping_counter}/{self.early_stopping_patience}')
+
+            # 早停检查
+            if early_stopping_counter >= self.early_stopping_patience:
+                logger.info(f'早停触发，在第 {epoch+1} 轮后停止训练')
+                break
+
+            # 显示当前学习率
+            if hasattr(self, 'scheduler') and self.scheduler is not None:
+                current_lr = self.scheduler.get_last_lr()[0]
+            else:
+                current_lr = self.optimizer.param_groups[0]['lr']
+            logger.info(f'  当前学习率: {current_lr:.2e}')
+
+        # 训练结束后保存最终模型
+        final_model_path = save_dir / 'final_model'
+        final_model_path.mkdir(parents=True, exist_ok=True)
+        if hasattr(self.model, 'model'):
+            # 如果是封装的模型，保存内部的transformers模型
+            self.model.model.save_pretrained(final_model_path)
+        else:
+            # 如果是直接的transformers模型，直接保存
+            self.model.save_pretrained(final_model_path)
+
+        self.tokenizer.save_pretrained(final_model_path)
+        logger.info(f'训练完成，保存最终模型到: {final_model_path}')
