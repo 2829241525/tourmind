@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
 data_collection_lock = Lock()
 progress_lock = Lock()
 login_lock = Lock()
+csv_write_lock = Lock()  # 新增：CSV文件写入锁
 
 
 class HotelRoomExtractor:
@@ -93,9 +94,39 @@ class HotelRoomExtractor:
         # 全局数据收集器
         self.all_hotel_data = []
 
+        # CSV文件写入相关
+        self.csv_output_file = None
+        self.csv_header_written = False
+
         if not self.config_available:
             logger.warning("配置模块不可用，使用模拟模式")
         logger.info(f"酒店房型提取器初始化完成，最大线程数: {max_workers}")
+
+    def write_to_csv_immediately(self, csv_rows: List[Dict[str, Any]]) -> None:
+        """线程安全地立即写入CSV文件"""
+        if not csv_rows or not self.csv_output_file:
+            return
+
+        try:
+            with csv_write_lock:
+                # 检查文件是否需要写入头部
+                if not self.csv_header_written:
+                    # 写入带头部的DataFrame
+                    df = pd.DataFrame(csv_rows)
+                    df.to_csv(self.csv_output_file, index=False,
+                              encoding='utf-8-sig', mode='w')
+                    self.csv_header_written = True
+                    logger.info(f"CSV文件头部已写入: {self.csv_output_file}")
+                else:
+                    # 追加写入（不包含头部）
+                    df = pd.DataFrame(csv_rows)
+                    df.to_csv(self.csv_output_file, index=False,
+                              encoding='utf-8-sig', mode='a', header=False)
+
+                logger.debug(f"已写入 {len(csv_rows)} 条记录到CSV文件")
+
+        except Exception as e:
+            logger.error(f"写入CSV文件失败: {str(e)}")
 
     def build_api_url(self, hotel_id: str, **override_params) -> tuple:
         """构建API URL和请求配置"""
@@ -134,7 +165,7 @@ class HotelRoomExtractor:
                 try:
                     response = requests.request(
                         method=method, url=url, headers=default_headers,
-                        verify=False, timeout=60, **kwargs)  # 增加超时时间到60秒
+                        verify=False, timeout=120, **kwargs)  # 增加超时时间到60秒
 
                     response_data = {
                         "status_code": response.status_code,
@@ -266,7 +297,11 @@ class HotelRoomExtractor:
             # 提取房型数据
             csv_rows = self.extract_room_types_for_csv(response_data, hotel_id)
 
-            # 线程安全地添加到全局数据收集器
+            # 立即写入CSV文件（如果有数据）
+            if csv_rows:
+                self.write_to_csv_immediately(csv_rows)
+
+            # 线程安全地添加到全局数据收集器（保留用于统计）
             with data_collection_lock:
                 self.all_hotel_data.extend(csv_rows)
 
@@ -293,7 +328,7 @@ class HotelRoomExtractor:
     def process_hotels_from_csv_multithreaded(self, csv_file_path: str, output_dir: str = "output",
                                               start_index: int = 0, end_index: int = None,
                                               delay_seconds: float = 1.0) -> str:
-        """使用多线程从CSV文件批量处理酒店，输出单个CSV文件"""
+        """使用多线程从CSV文件批量处理酒店，实时写入CSV文件"""
         try:
             # 读取酒店列表CSV
             logger.info(f"正在读取酒店列表文件: {csv_file_path}")
@@ -324,6 +359,12 @@ class HotelRoomExtractor:
             # 创建输出目录
             os.makedirs(output_dir, exist_ok=True)
 
+            # 准备CSV输出文件
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.csv_output_file = os.path.join(
+                output_dir, f"hotel_room_types_{timestamp}.csv")
+            self.csv_header_written = False
+
             # 重置计数器和数据收集器
             self.processed_count = 0
             self.error_count = 0
@@ -331,6 +372,7 @@ class HotelRoomExtractor:
 
             # 使用线程池处理酒店
             logger.info(f"开始使用{self.max_workers}个线程并发处理酒店...")
+            logger.info(f"实时写入CSV文件: {self.csv_output_file}")
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # 提交所有任务
@@ -357,19 +399,6 @@ class HotelRoomExtractor:
                         with progress_lock:
                             self.error_count += 1
 
-            # 保存所有数据到一个CSV文件
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = os.path.join(
-                output_dir, f"hotel_room_types_{timestamp}.csv")
-
-            if self.all_hotel_data:
-                df = pd.DataFrame(self.all_hotel_data)
-                df.to_csv(output_file, index=False, encoding='utf-8-sig')
-                logger.info(
-                    f"所有房型数据已保存到: {output_file} (共{len(self.all_hotel_data)}条记录)")
-            else:
-                logger.warning("没有提取到任何房型数据")
-
             # 输出最终统计
             logger.info("="*80)
             logger.info("多线程批量处理完成汇总:")
@@ -377,10 +406,10 @@ class HotelRoomExtractor:
             logger.info(f"成功处理: {self.processed_count}")
             logger.info(f"失败处理: {self.error_count}")
             logger.info(f"总房型记录数: {len(self.all_hotel_data)}")
-            logger.info(f"输出文件: {output_file}")
+            logger.info(f"实时写入的CSV文件: {self.csv_output_file}")
             logger.info("="*80)
 
-            return output_file
+            return self.csv_output_file
 
         except Exception as e:
             logger.error(f"多线程批量处理失败: {str(e)}")
@@ -391,10 +420,10 @@ def main():
     """主函数 - 示例用法"""
     try:
         # 初始化提取器（使用10个线程）
-        extractor = HotelRoomExtractor(max_workers=4)
+        extractor = HotelRoomExtractor(max_workers=2)
 
         # CSV文件路径
-        csv_file = "1000sampled_hotels.csv"
+        csv_file = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/1000sampled_hotels.csv"
 
         # 检查文件是否存在
         if not os.path.exists(csv_file):
@@ -404,7 +433,7 @@ def main():
         # 多线程批量处理酒店（示例：处理前20个酒店）
         output_file = extractor.process_hotels_from_csv_multithreaded(
             csv_file_path=csv_file,
-            output_dir="output",
+            output_dir="/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/output",
             start_index=0,
             end_index=2000,  # 处理前20个酒店
             delay_seconds=1.0  # 每个请求间隔1秒，增加等待时间

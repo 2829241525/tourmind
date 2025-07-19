@@ -16,19 +16,11 @@ LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 # 确保目录存在
-try:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(MODELS_DIR, exist_ok=True)
-except PermissionError:
-    # 如果无法创建目录，使用当前目录
-    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-    LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
-    MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(MODELS_DIR, exist_ok=True)
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+
 
 # ===== 日志配置 =====
 LOG_CONFIG = {
@@ -52,9 +44,9 @@ ROOM_MATCHING_CONFIG = {
 
 # ===== LLM配置 =====
 LLM_CONFIG = { 
-    # 阿里云千问配置 (默认)qwen-max deepseek-r1 qwen-plus deepseek-r1-0528
+    # 阿里云千问配置 (默认)qwen-max deepseek-r1 qwen-plus deepseek-r1-0528 qwq-plus qwq-plus-latest
     'qwen': {
-        'model_name': 'qwen-plus',
+        'model_name': 'qwen-plus-latest',
         'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         'temperature': 0.7,
         'max_tokens': 20000,  # 从10000增加到20000，支持更长的响应
