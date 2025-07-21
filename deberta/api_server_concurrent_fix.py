@@ -76,7 +76,7 @@ BED_PREFIX = "[bed]"
 
 # 模型路径映射
 MODEL_PATHS = {
-    'cross_entropy': os.path.join(BASE_DIR, 'checkpoints_cloud_result_nosplct/best_model')
+    'cross_entropy': os.path.join(BASE_DIR, 'checkpoints_cross_entropy_side_apartment_fix_5e-6/best_model')
 }
 DEFAULT_MODEL = 'cross_entropy'
 
@@ -1278,7 +1278,7 @@ async def match_rooms(request: MatchRequest, background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     # 使用单worker模式避免多进程GPU内存问题
-    workers = 4  # 使用单worker
+    workers = 1  # 使用单worker
 
     # 根据环境设置uvicorn日志级别
     app_env = os.environ.get("APP_ENV", "development").lower()
@@ -1288,7 +1288,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "api_server_concurrent_fix:app",  # 直接传递app实例
         host="0.0.0.0",
-        port=13001,
+        port=13003,
         workers=workers,  # 单worker模式
         log_level=uvicorn_log_level,
         access_log=(app_env == "development"),
