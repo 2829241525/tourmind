@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import random
 from collections import defaultdict
 import itertools
+from extract_groups import extract_groups
 
 # ===================== 配置区域 =====================
 # 路径配置
@@ -23,6 +24,7 @@ BASE_DIR = "/home/maxon/disk2/roomMatch/room_match/chinese_match"
 MODEL_PATH = os.path.join(BASE_DIR, 'checkpoints_group_result_fix/best_model')
 INPUT_CSV_PATH = "/home/maxon/disk2/roomMatch/room_match/chinese_match/group_eval/s_room_2025-07-21_095100.csv"
 OUTPUT_CSV_PATH = "/home/maxon/disk2/roomMatch/room_match/chinese_match/group_eval/s_room_eval.csv"
+V_ROOM_PATH = "/home/maxon/disk2/roomMatch/room_match/chinese_match/group_eval/v2_room_groupings_eval.csv"
 
 # 处理配置
 MAX_HOTELS = 200000  # 限制处理的酒店数量
@@ -300,6 +302,33 @@ def process_hotel_batch(processor, hotel_batch_data, batch_idx):
     return all_results
 
 
+def get_v_hotel_data():
+    """获取V房间数据中的酒店ID并过滤S房间数据"""
+    try:
+        # 读取V房间数据
+        logger.info(f"读取V房间CSV文件: {V_ROOM_PATH}")
+        v_df = pd.read_csv(V_ROOM_PATH, on_bad_lines='skip', escapechar='\\')
+
+        # 获取唯一的酒店ID
+        v_hotel_ids = v_df['SHotelId'].unique()
+        logger.info(f"V房间数据中共有 {len(v_hotel_ids)} 个唯一酒店ID")
+
+        # 读取S房间数据
+        logger.info(f"读取S房间CSV文件: {INPUT_CSV_PATH}")
+        s_df = pd.read_csv(
+            INPUT_CSV_PATH, on_bad_lines='skip', escapechar='\\')
+
+        # 过滤出匹配的酒店数据
+        filtered_df = s_df[s_df['s_hotel_id'].isin(v_hotel_ids)]
+        logger.info(f"过滤后的S房间数据: {len(filtered_df)} 行")
+
+        return filtered_df
+
+    except Exception as e:
+        logger.error(f"处理V房间数据时出错: {str(e)}")
+        raise
+
+
 def main():
     """主函数"""
     try:
@@ -307,9 +336,13 @@ def main():
         processor = GroupSimilarityProcessor(MODEL_PATH)
 
         # 读取CSV文件
-        logger.info(f"读取CSV文件: {INPUT_CSV_PATH}")
-        df = pd.read_csv(INPUT_CSV_PATH, on_bad_lines='skip', escapechar='\\')
-        logger.info(f"原始数据: {len(df)} 行")
+        # logger.info(f"读取CSV文件: {INPUT_CSV_PATH}")
+        # df = pd.read_csv(INPUT_CSV_PATH, on_bad_lines='skip', escapechar='\\')
+        # logger.info(f"原始数据: {len(df)} 行")
+
+        # 获取经过V房间过滤的数据
+        df = get_v_hotel_data()
+        logger.info(f"开始处理经过V房间过滤的数据: {len(df)} 行")
 
         # 按s_hotel_id分组
         grouped = df.groupby('s_hotel_id')
@@ -358,6 +391,12 @@ def main():
 
         # 输出统计信息
         print_statistics(result_df)
+
+        # 提取并保存大分组数据
+        large_groups_output = os.path.join(os.path.dirname(
+            OUTPUT_CSV_PATH), 's_room_eval_large_groups.csv')
+        logger.info("\n开始提取大分组数据...")
+        extract_groups(OUTPUT_CSV_PATH, large_groups_output)
 
     except Exception as e:
         logger.error(f"程序执行失败: {str(e)}")

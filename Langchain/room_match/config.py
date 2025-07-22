@@ -36,7 +36,7 @@ ROOM_MATCHING_CONFIG = {
     'matching_method': 'llm',  # 可选: 'llm' 或 'agent'
     'enable_dl_matching': False,  # 是否启用深度学习匹配
     'llm_timeout': 300,  # LLM调用超时时间（秒），从180增加到300
-    'agent_max_iterations': 10,  # Agent最大迭代次数，从3增加到10
+    'agent_max_iterations': 3,  # Agent最大迭代次数，从3增加到10
     'agent_verbose': True,  # Agent是否输出详细信息
     'agent_early_stopping_method': 'generate',  # 早停方法
     'agent_handle_parsing_errors': True,  # 处理解析错误

@@ -165,7 +165,7 @@ class HotelRoomExtractor:
                 try:
                     response = requests.request(
                         method=method, url=url, headers=default_headers,
-                        verify=False, timeout=120, **kwargs)  # 增加超时时间到60秒
+                        verify=False, timeout=180, **kwargs)  # 增加超时时间到60秒
 
                     response_data = {
                         "status_code": response.status_code,
@@ -420,10 +420,10 @@ def main():
     """主函数 - 示例用法"""
     try:
         # 初始化提取器（使用10个线程）
-        extractor = HotelRoomExtractor(max_workers=2)
+        extractor = HotelRoomExtractor(max_workers=1)
 
         # CSV文件路径
-        csv_file = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/1000sampled_hotels.csv"
+        csv_file = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/1sampled_hotels.csv"
 
         # 检查文件是否存在
         if not os.path.exists(csv_file):

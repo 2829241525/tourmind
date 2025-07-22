@@ -137,7 +137,7 @@ class HttpInfoProcessor:
                 default_headers.update(headers)
 
             response = requests.request(
-                method=method, url=url, headers=default_headers, verify=False, **kwargs)
+                method=method, url=url, headers=default_headers, verify=False, timeout=180, **kwargs)
 
             response_data = {
                 "status_code": response.status_code,
@@ -441,7 +441,9 @@ class HttpInfoProcessor:
                 "unmatched_supplier_rooms", [])
             unmatched_list = []
             unmatched_room_names = []
-            for i, room in enumerate(unmatched_rooms, 1):
+            # 限制最大数额为20
+            max_rooms = min(20, len(unmatched_rooms))
+            for i, room in enumerate(unmatched_rooms[:max_rooms], 1):
                 room_name = room['combined_name']
                 unmatched_list.append(f"[{i}]: {room_name}")
                 unmatched_room_names.append(room_name)

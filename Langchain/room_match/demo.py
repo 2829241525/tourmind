@@ -36,8 +36,9 @@ def demo_http_info_processor():
     # 步骤1参数 - 使用酒店ID
     #hotel_id = "2146988"  # 可以配置不同的酒店ID
     #hotel_id = "799311"  # 可以配置不同的酒店ID
-    hotel_id = "8789588"  # 可以配置不同的酒店ID
+    #hotel_id = "8789588"  # 可以配置不同的酒店ID
     #hotel_id = "15896204"  # 可以配置不同的酒店ID
+    hotel_id = "2424723"  # 可以配置不同的酒店ID
     step1_params = {
         "hotel_id": hotel_id,
         "method": "GET"

@@ -108,7 +108,7 @@ start_service() {
         -p ${PORT}:13001 \
         -v $(pwd)/docker/logs:/app/logs \
         -v $(pwd)/data:/app/data \
-        -v $(pwd)/checkpoints_cross_entropy_side_fix:/app/checkpoints_cloud_result_nosplct \
+        -v $(pwd)/checkpoints_cross_entropy_side_apartment_fix:/app/checkpoints_cloud_result_nosplct \
         -e TZ=Asia/Shanghai \
         --ulimit nofile=65536:65536 \
         ${GPU_FLAG} \
