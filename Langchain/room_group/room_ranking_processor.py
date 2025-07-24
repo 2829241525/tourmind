@@ -36,7 +36,17 @@ sys.path.insert(0, os.path.join(LANGCHAIN_MASTER_PATH, "libs", "core"))
 sys.path.insert(0, os.path.join(
     LANGCHAIN_MASTER_PATH, "libs", "partners", "openai"))
 
-# LLM配置qwen-plus-latest
+# 基础配置
+BASE_CONFIG = {
+    # 指定要处理的酒店ID列表，如果为None则按比例采样 [12395035, 25709125, 21109218]
+    #'hotel_ids': None,
+    'hotel_ids': [12976637, 825476],
+    'target_hotel_count': 1000,  # 采样目标酒店数量（当hotel_ids为None时使用）
+    'max_workers': 5,  # 最大并发线程数
+    'batch_size': 20  # 每批处理的房型对数量
+}
+
+# LLM配置qwen-plus-latest deepseek-r1
 LLM_CONFIG = {
     'qwen': {
         'model_name': 'qwen-plus-latest',
@@ -87,16 +97,16 @@ class RoomRankingProcessor:
 
 你现在是一名极其严谨、注重细节的酒店数据分析专家。你的核心任务是根据房型描述，对它们进行两两比较，并严格依据下述的“全面优势判断”原则，分析其相对等级。
 
-**任务**: 对房型列表中的所有房型进行两两比较，分析它们的相对等级关系（更高、更低、相等、或无法比较）。
+**任务**: 对房型列表中的每一个房型对进行分析，判断第一个房型相对于第二个房型的等级关系（更高、更低、相等、或无法比较）。
 
 # 第二部分：核心分析原则 (Core Analytical Principles)
 
 ## 一、比较维度与内部层级 (Dimensions of Comparison & Hierarchies)
 
-在分析时，你需要从以下所有维度对每个房型进行特征提取和评估。
+在分析时，你需要从以下所有维度对每个房型进行特征提取和评估，如果出现以下维度所列以外的词汇，请以自身所具备的知识进行分析，以下知识仅做参考。
 
 1.  **房型等级 (Room Grade)**: Executive > Premier > Deluxe > Superior > Standard > Economy. (默认: Standard)
-2.  **房间类型 (Room Type)**: Villa / Apartment > Suite > Studio > Room.
+2.  **房间类型 (Room Type)**: Villa / Apartment /family > Suite > Studio > Room.
 3.  **景观 (View)**:
     *   **有无对比**: 任何明确指出的景观 > 无景观。
     *   **同类景观内部层级**: Beachfront / Oceanfront > Sea View; Pool Access > Pool View.
@@ -110,48 +120,59 @@ class RoomRankingProcessor:
         *   **低于 "确定的最优选项"**: `1 Queen Bed/1 King Bed` **低于** `1 King Bed`。因为前者不保证能获得King Bed。
         *   **高于 "确定的最差选项"**: `1 Queen Bed/1 King Bed` **高于** `1 Queen Bed`。因为前者有获得更优King Bed的可能性。
 
+7.  **房间主题/特色 (room theme)**: 
+    *   **描述分析**: 分析整体描述，哪些描述词汇是房间的主题/特色，主题/特色不一定以theme/feature表述。
+    *   **有无对比**: 有主题/特色描述 > 无主题/特色描述。
+    *   ** 不同主题/特色不可比**: 不同类型的主题/特色（如 动漫/电影/明星/特殊景观/动物等等）视为主题/特色不同，没有高低之分。当两个房型主题不同时，强制不可比
 7.  **附加福利 (Benefits)**: 包含免费早餐、机场接送、行政酒廊待遇等福利的房型更优。
-8.  **限制条款 (Restrictions)**: “可退款”优于“不可退款”。
+8.  **限制条款 (Restrictions)**: “可退款”优于“不可退款”，可吸烟优于禁烟，可携带宠物优于禁带宠物。
 
 ## 二、判断规则 (Rules of Judgment)
 
 请严格遵循以下规则来判定房型对的关系。
 
-### HIGHER / LOWER (全面优势)
+### HIGHER (A 全面优于 B)
 *   **规则**: 房型A比房型B **HIGHER**，当且仅当：
     1.  房型A在**至少一个**比较维度上明确优于房型B。
-    2.  并且，房型A在**所有其他**比较维度上**等于或优于**房型B（即，没有任何一个维度劣于B）。
+    2.  并且，房型A在**所有其他**比较维度上**等于或优于**房型B（即，B没有任何一个维度优于A）。
+
+### LOWER (B 全面优于 A)
+*   **规则**: 房型A比房型B **LOWER**，当且仅当：
+    1.  房型B在**至少一个**比较维度上明确优于房型A。
+    2.  并且，房型B在**所有其他**比较维度上**等于或优于**房型A（即，A没有任何一个维度优于B）。
 
 ### INCOMPARABLE (优劣互换、特色不同 或 强制不可比)
-*   **规则**: 如果两个房型存在任何形式的“优劣互换”，或具有不可比的特色，或触发了强制不可比条件，则判定为 **INCOMPARABLE**。
-*   **此规则覆盖以下所有情况**:
-    *   **强制不可比 - 无障碍设施**: 如果一个房型是 `Accessible` (无障碍) 而另一个不是，直接判定为 **INCOMPARABLE**。这是一个独立的、高优先级的判断。
-    *   **福利/限制/核心设施不一致**: `A: 含早餐` vs `B: 不含早餐` -> INCOMPARABLE. `A: 有阳台` vs `B: 无阳台` -> INCOMPARABLE.
-    *   **不同景观类型**: `A: 海景` vs `B: 城景` -> INCOMPARABLE.
-    *   **关键维度冲突 (优劣互换)**:
-        *   `A: Deluxe Room` vs `B: Standard Suite` (等级 vs 类型).
-        *   `A: 1 King Bed` vs `B: 2 Double Beds` (床尺寸 vs 床数量).
+*   **规则**: 如果不满足 HIGHER, LOWER, 或 EQUAL 的任何条件，则为 **INCOMPARABLE**。这通常是因为：
+    *   **强制不可比**: 一个房型是 `Accessible` 而另一个不是。
+    *   **特色不同**: 拥有不同类型的景观 (`海景` vs `城景`)、不同的核心设施 (`阳台` vs `厨房`)、或不同的福利 (`早餐` vs `机场接送`)。
+    *   **优劣互换 (关键维度冲突)**: A在某些维度优于B，同时B在另一些维度优于A (`A: Deluxe Room` vs `B: Standard Suite`; `A: 1 King Bed` vs `B: 2 Double Beds`)。
+    *   **特别关注**: A在某些维度优于B，但B在以上任何一个维度优于A（包括床数，设施，景观等等）。则判定为 **INCOMPARABLE**。
+    *   **主题/特征**: A与B都有各自的主题,且主题不一致时。则判定为 **INCOMPARABLE**。
 
 ### EQUAL (完全相同)
-*   **规则**: 只有当两个房型在**所有**比较维度上都完全相同时（包括无障碍设施状态），才判定为 **EQUAL**。
+*   **规则**: 只有当两个房型在**所有**比较维度上都完全相同时，才判定为 **EQUAL**。
 
 # 第三部分：分析思维框架 (Analytical Framework)
 
 为了确保结果的准确性，请严格遵循以下思考步骤：
 
-1.  **选取一对房型 (A, B)**。
+1.  **选取一对房型 (A, B)** 从列表中。
 
-2.  **全面特征提取**: 首先，并列分析A和B的所有特征。为每个房型识别其在所有维度上的具体情况（等级、类型、景观、设施、无障碍、床数、床型（包括不确定性）、福利、限制等）。
+2.  **全面特征提取**: 首先，并列分析A和B的所有特征，识别出它们在所有维度上的具体情况。
 
-3.  **进行优劣势对比**:
-    *   **第一步：检查强制不可比条件**。首先检查“无障碍设施”是否不同。如果不同，立即判定为 **INCOMPARABLE**。
-    *   **第二步：识别其他冲突与差异点**。如果上一步通过，则继续检查是否存在其他“优劣互换”或“特色不同”（如不同景观、福利不一致、等级vs类型冲突等）。
-    *   **第三步：应用判断规则**:
-        *   如果在前两步中**发现任何冲突或不可比差异**，判定为 **INCOMPARABLE** 并说明原因。
-        *   如果没有冲突，再检查是否存在**单向优势**。即，A是否在至少一个维度上优于B，且在其他所有维度上都不劣于B？如果满足，则判定为 **HIGHER**。
-        *   如果既没有冲突，也没有单向优势，说明两者在所有维度上都完全相同，判定为 **EQUAL**。
+3.  **进行优劣势对比 (核心逻辑)**:
+    *   **第一步：检查强制不可比条件**。检查“无障碍设施”是否不同。同时检查是否存在“特色不同”（如不同景观、不同福利）。如果存在，立即判定为 **INCOMPARABLE** 并说明原因。
+    *   **第二步：评估双方优势**。如果上一步通过，则系统地比较所有剩余维度：
+        *   记录下所有 **“A优于B”** 的维度。
+        *   记录下所有 **“B优于A”** 的维度。
+    *   **第三步：应用最终判断规则**:
+        *   如果 **“A优于B”的维度列表不为空** 且 **“B优于A”的维度列表为空** -> 结果是 **HIGHER**。
+        *   如果 **“A优于B”的维度列表为空** 且 **“B优于A”的维度列表不为空** -> 结果是 **LOWER**。
+        *   如果 **“A优于B”的维度列表为空** 且 **“B优于A”的维度列表也为空** -> 结果是 **EQUAL**。
+        *   如果 **“A优于B”的维度列表不为空** 且 **“B优于A”的维度列表也不为空** -> 存在优劣互换，结果是 **INCOMPARABLE**。
 
-4.  **循环操作**，直到完成所有房型对的比较。
+4.  **反思逻辑**，如果输出不是INCOMPARABLE需要进行二次思考，对输出的结果进行再次思考，输出是否综合考虑而忽略了规则，输出格式是否合规等，注明：一定要有房间主题/特色规则的相关分析。
+5.  **循环操作**，直到完成所有房型对的比较。
 
 # 第四部分：分析任务与输出格式
 
@@ -162,10 +183,10 @@ class RoomRankingProcessor:
 请严格按照以下格式输出，对上述每一个房型对比进行分析。每个比较都必须另起一行，并给出具体、清晰的理由。
 
 ## 比较结果
-房型A名称 vs 房型B名称: **HIGHER** - 理由：[A在某个维度上更优（例如：床型更优(确定的King > 不确定的Queen/King)），且在所有其他维度上不劣于B]
-房型A名称 vs 房型B名称: **LOWER** - 理由：[A在某个维度上更劣，且在所有其他维度上不优于B]
-房型A名称 vs 房型B名称: **EQUAL** - 理由：[所有维度均完全相同]
-房型A名称 vs 房型B名称: **INCOMPARABLE** - 理由：[存在优劣互换或特色不同，请明确指出原因，例如：无障碍设施不一致；福利不一致；或关键维度冲突(床尺寸vs床数量)；或特色不同(海景vs城景)]
+房型A名称 vs 房型B名称: - 理由：[A在某个维度上更优（说明是哪个维度），且B房型、床型、景观、设施、福利、特色等其他领域上没有任何优势] - 反思逻辑：[和之前思考一致/仔细思考后发现...] - 最终结论：**HIGHER**
+房型A名称 vs 房型B名称: - 理由：[A在某个维度上更劣（说明是哪个维度），且B房型、床型、景观、设施、福利、特色等其他领域上没有任何优势] - 反思逻辑：[和之前思考一致/仔细思考后发现...] - 最终结论：**LOWER**
+房型A名称 vs 房型B名称: - 理由：[所有包括型、床型、景观、设施、福利、特色等维度均完全相同] - 反思逻辑：[和之前思考一致/仔细思考后发现...] - 最终结论：**EQUAL**
+房型A名称 vs 房型B名称: - 理由：[存在优劣互换或特色不同，请明确指出原因，例如：无障碍设施不一致；或关键维度冲突(A在等级上占优，B在床数量上占优)] - 反思逻辑：[和之前思考一致/仔细思考后发现...] - 最终结论：**INCOMPARABLE**
 """
         self.prompt_template = prompt_template
 
@@ -333,13 +354,43 @@ class RoomRankingProcessor:
         logger.info(f"  ❌ 较差 (<50%): {poor_count} 酒店")
         logger.info("=" * 60)
 
-    def load_and_sample_hotels(self, csv_file_path: str, target_hotel_count: int = 1000) -> pd.DataFrame:
-        """加载数据并按国家比例采样酒店"""
+    def load_and_sample_hotels(self, csv_file_path: str, target_hotel_count: int = 1000, hotel_ids: List[int] = None) -> pd.DataFrame:
+        """加载数据并按国家比例采样酒店
+
+        Args:
+            csv_file_path: CSV文件路径
+            target_hotel_count: 目标采样酒店数量（当hotel_ids为None时使用）
+            hotel_ids: 指定要处理的酒店ID列表，如果提供则直接处理这些酒店
+
+        Returns:
+            包含采样或指定酒店数据的DataFrame
+        """
         try:
             logger.info(f"开始读取CSV文件: {csv_file_path}")
             df = pd.read_csv(csv_file_path)
             logger.info(f"CSV文件读取成功，总行数: {len(df)}")
 
+            if hotel_ids:
+                # 如果指定了酒店ID，直接筛选这些酒店的数据
+                sampled_df = df[df['s_hotel_id'].isin(hotel_ids)].copy()
+                found_hotels = sampled_df['s_hotel_id'].unique()
+                missing_hotels = set(hotel_ids) - set(found_hotels)
+
+                logger.info(f"指定处理 {len(hotel_ids)} 个酒店")
+                logger.info(f"找到 {len(found_hotels)} 个酒店的数据")
+                if missing_hotels:
+                    logger.warning(f"未找到以下酒店的数据: {missing_hotels}")
+
+                # 显示找到的酒店的国家分布
+                country_stats = sampled_df.groupby(
+                    's_hotel_id')['country_code'].first().value_counts()
+                logger.info("找到酒店的国家分布:")
+                for country, count in country_stats.items():
+                    logger.info(f"  {country}: {count}")
+
+                return sampled_df
+
+            # 如果没有指定酒店ID，按原有逻辑进行采样
             # 获取每个国家的酒店数量
             hotel_country = df.groupby('s_hotel_id')[
                 'country_code'].first().reset_index()
@@ -368,7 +419,7 @@ class RoomRankingProcessor:
 
                 sampled_hotels.extend(sampled)
 
-            # 如果采样数量不够1000，补充采样
+            # 如果采样数量不够目标数量，补充采样
             if len(sampled_hotels) < target_hotel_count:
                 remaining_hotels = hotel_country[~hotel_country['s_hotel_id'].isin(
                     sampled_hotels)]['s_hotel_id'].tolist()
@@ -576,70 +627,106 @@ class RoomRankingProcessor:
 
             for line in lines:
                 line = line.strip()
-                if ' vs ' in line and '**' in line:
+                if ' vs ' in line and '最终结论：**' in line:
                     try:
-                        # 解析格式：房型A名称 vs 房型B名称: **RESULT** - 理由
-                        parts = line.split(': **')
-                        if len(parts) >= 2:
-                            # 提取房型名称
-                            room_pair = parts[0].strip()
-                            if ' vs ' in room_pair:
-                                room_a, room_b = room_pair.split(' vs ', 1)
-                                room_a = room_a.strip()
-                                room_b = room_b.strip()
+                        # 解析新格式：房型A名称 vs 房型B名称: - 理由：[...] - 反思逻辑：[...] - 最终结论：**RESULT**
+                        # 分离房型对和内容部分
+                        if ': - 理由：' in line:
+                            room_pair_part, content_part = line.split(
+                                ': - 理由：', 1)
+                        else:
+                            continue
 
-                                # 提取比较结果和理由
-                                result_part = parts[1]
-                                if '** - ' in result_part:
-                                    result, reason = result_part.split(
-                                        '** - ', 1)
-                                    result = result.strip()
-                                    reason = reason.strip()
-                                    # 处理中文冒号
-                                    if reason.startswith('理由：'):
-                                        reason = reason[3:].strip()
-                                elif '**' in result_part:
-                                    result = result_part.split('**')[0].strip()
-                                    reason = result_part.split(
-                                        '**', 1)[1].strip()
-                                    if reason.startswith(' - '):
-                                        reason = reason[3:]
-                                    # 处理中文冒号
-                                    if reason.startswith('理由：'):
-                                        reason = reason[3:].strip()
+                        # 提取房型名称
+                        if ' vs ' in room_pair_part:
+                            room_a, room_b = room_pair_part.split(' vs ', 1)
+                            room_a = room_a.strip()
+                            room_b = room_b.strip()
+                        else:
+                            continue
+
+                        # 解析内容部分：理由 - 反思逻辑 - 最终结论：**RESULT**
+                        reason = ""
+                        reflection = ""
+                        result = ""
+
+                        if ' - 反思逻辑：' in content_part and ' - 最终结论：**' in content_part:
+                            # 完整格式：理由 - 反思逻辑 - 最终结论
+                            reason_part, remaining = content_part.split(
+                                ' - 反思逻辑：', 1)
+                            reason = reason_part.strip()
+
+                            if ' - 最终结论：**' in remaining:
+                                reflection_part, conclusion_part = remaining.split(
+                                    ' - 最终结论：**', 1)
+                                reflection = reflection_part.strip()
+
+                                # 提取结果
+                                if '**' in conclusion_part:
+                                    result = conclusion_part.split(
+                                        '**')[0].strip()
                                 else:
-                                    result = result_part.strip()
-                                    reason = ""
+                                    result = conclusion_part.strip()
 
-                                # 验证房型对是否在期望列表中
-                                parsed_pair = tuple(sorted([room_a, room_b]))
-                                if parsed_pair in expected_pairs:
-                                    results.append({
-                                        'room_a': room_a,
-                                        'room_b': room_b,
-                                        'comparison_result': result,
-                                        'reason': reason
-                                    })
-                                else:
-                                    # 尝试模糊匹配
-                                    found_match = False
-                                    for expected_a, expected_b in room_pairs:
-                                        if ((room_a in expected_a or expected_a in room_a) and
-                                            (room_b in expected_b or expected_b in room_b)) or \
-                                           ((room_a in expected_b or expected_b in room_a) and
-                                                (room_b in expected_a or expected_a in room_b)):
-                                            results.append({
-                                                'room_a': room_a,
-                                                'room_b': room_b,
-                                                'comparison_result': result,
-                                                'reason': reason
-                                            })
-                                            found_match = True
-                                            break
+                        elif ' - 最终结论：**' in content_part:
+                            # 简化格式：理由 - 最终结论（可能没有反思逻辑）
+                            reason_part, conclusion_part = content_part.split(
+                                ' - 最终结论：**', 1)
+                            reason = reason_part.strip()
 
-                                    if not found_match:
-                                        logger.warning(
-                                            f"房型对未找到匹配: {room_a} vs {room_b}")
+                            # 提取结果
+                            if '**' in conclusion_part:
+                                result = conclusion_part.split('**')[0].strip()
+                            else:
+                                result = conclusion_part.strip()
+
+                        # 清理处理理由和反思逻辑
+                        if reason.startswith('[') and reason.endswith(']'):
+                            reason = reason[1:-1].strip()
+                        if reflection.startswith('[') and reflection.endswith(']'):
+                            reflection = reflection[1:-1].strip()
+
+                        # 合并理由和反思逻辑
+                        combined_reason = reason
+                        if reflection:
+                            combined_reason += f" | 反思：{reflection}"
+
+                        # 验证结果是否为有效的比较结果
+                        if result.upper() in ['HIGHER', 'LOWER', 'EQUAL', 'INCOMPARABLE']:
+                            result = result.upper()
+
+                            # 验证房型对是否在期望列表中
+                            parsed_pair = tuple(sorted([room_a, room_b]))
+                            if parsed_pair in expected_pairs:
+                                results.append({
+                                    'room_a': room_a,
+                                    'room_b': room_b,
+                                    'comparison_result': result,
+                                    'reason': combined_reason
+                                })
+                            else:
+                                # 尝试模糊匹配
+                                found_match = False
+                                for expected_a, expected_b in room_pairs:
+                                    if ((room_a in expected_a or expected_a in room_a) and
+                                        (room_b in expected_b or expected_b in room_b)) or \
+                                       ((room_a in expected_b or expected_b in room_a) and
+                                            (room_b in expected_a or expected_a in room_b)):
+                                        results.append({
+                                            'room_a': room_a,
+                                            'room_b': room_b,
+                                            'comparison_result': result,
+                                            'reason': combined_reason
+                                        })
+                                        found_match = True
+                                        break
+
+                                if not found_match:
+                                    logger.warning(
+                                        f"房型对未找到匹配: {room_a} vs {room_b}")
+                        else:
+                            logger.warning(f"无效的比较结果: {result}")
+
                     except Exception as e:
                         logger.warning(f"解析比较结果行失败: {line}, 错误: {str(e)}")
                         continue
@@ -853,13 +940,24 @@ class RoomRankingProcessor:
             raise
 
     def run_ranking_analysis(self, csv_file_path: str, target_hotel_count: int = 1000,
-                             max_workers: int = 5, batch_size: int = 20) -> str:
-        """运行房型排序分析"""
+                             max_workers: int = 5, batch_size: int = 20, hotel_ids: List[int] = None) -> str:
+        """运行房型排序分析
+
+        Args:
+            csv_file_path: CSV文件路径
+            target_hotel_count: 目标采样酒店数量（当hotel_ids为None时使用）
+            max_workers: 最大并发线程数
+            batch_size: 每批处理的房型对数量
+            hotel_ids: 指定要处理的酒店ID列表，如果提供则直接处理这些酒店
+
+        Returns:
+            输出文件路径
+        """
         try:
             # 1. 加载和采样数据
             logger.info("第1步：加载和采样数据")
             sampled_df = self.load_and_sample_hotels(
-                csv_file_path, target_hotel_count)
+                csv_file_path, target_hotel_count, hotel_ids)
 
             # 2. 准备房型数据
             logger.info("第2步：准备房型数据")
@@ -911,15 +1009,31 @@ def main():
 
     print("开始房型排序分析...")
     print(f"目标文件: {csv_file_path}")
-    print("采样1000个酒店，按国家比例分布")
-    print("使用5个线程并发处理，每批次最多20个房型对比")
+
+    # 获取配置
+    hotel_ids = BASE_CONFIG['hotel_ids']
+    target_hotel_count = BASE_CONFIG['target_hotel_count']
+    max_workers = BASE_CONFIG['max_workers']
+    batch_size = BASE_CONFIG['batch_size']
+
+    if hotel_ids:
+        print(f"处理指定的 {len(hotel_ids)} 个酒店")
+        for hotel_id in hotel_ids[:5]:  # 只显示前5个
+            print(f"  - 酒店ID: {hotel_id}")
+        if len(hotel_ids) > 5:
+            print(f"  ... 等共 {len(hotel_ids)} 个酒店")
+    else:
+        print(f"采样 {target_hotel_count} 个酒店，按国家比例分布")
+
+    print(f"使用 {max_workers} 个线程并发处理，每批次最多 {batch_size} 个房型对比")
 
     try:
         output_file = processor.run_ranking_analysis(
             csv_file_path=csv_file_path,
-            target_hotel_count=3,
-            max_workers=5,
-            batch_size=20
+            target_hotel_count=target_hotel_count,
+            max_workers=max_workers,
+            batch_size=batch_size,
+            hotel_ids=hotel_ids
         )
 
         if output_file:
