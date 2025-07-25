@@ -39,9 +39,9 @@ sys.path.insert(0, os.path.join(
 # 基础配置
 BASE_CONFIG = {
     # 指定要处理的酒店ID列表，如果为None则按比例采样 [12395035, 25709125, 21109218]
-    #'hotel_ids': None,
-    'hotel_ids': [12976637, 825476],
-    'target_hotel_count': 1000,  # 采样目标酒店数量（当hotel_ids为None时使用）
+    'hotel_ids': None,
+    #'hotel_ids': [12976637],
+    'target_hotel_count': 3000,  # 采样目标酒店数量（当hotel_ids为None时使用）
     'max_workers': 5,  # 最大并发线程数
     'batch_size': 20  # 每批处理的房型对数量
 }
