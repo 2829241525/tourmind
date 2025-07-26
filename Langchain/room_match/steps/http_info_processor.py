@@ -20,6 +20,8 @@ import sys
 import os
 import random
 import re
+import csv
+import datetime
 from typing import Dict, Any, Optional, List
 
 # 添加父目录到路径以支持直接运行
@@ -428,6 +430,143 @@ class HttpInfoProcessor:
             logger.error(f"房型数据提取失败: {str(e)}")
             return {"error": str(e)}
 
+    def parse_llm_matching_result(self, llm_response: str, unmatched_rooms: List[str], standard_rooms: List[str]) -> List[Dict[str, str]]:
+        """解析大模型的匹配结果
+
+        Args:
+            llm_response: 大模型的响应文本
+            unmatched_rooms: 未匹配的房型列表（格式: [1]: 房型名称）
+            standard_rooms: 标准房型列表（格式: [1]: 房型名称）
+
+        Returns:
+            匹配结果列表，每个元素包含supplier_room和standard_room
+        """
+        try:
+            matching_results = []
+
+            # 创建房型索引映射
+            unmatched_map = {}
+            standard_map = {}
+
+            # 解析未匹配房型索引
+            for room_str in unmatched_rooms:
+                if room_str.startswith('[') and ']:' in room_str:
+                    idx_str = room_str.split(']:')[0][1:]
+                    room_name = room_str.split(']:')[1].strip()
+                    try:
+                        unmatched_map[int(idx_str)] = room_name
+                    except ValueError:
+                        continue
+
+            # 解析标准房型索引
+            for room_str in standard_rooms:
+                if room_str.startswith('[') and ']:' in room_str:
+                    idx_str = room_str.split(']:')[0][1:]
+                    room_name = room_str.split(']:')[1].strip()
+                    try:
+                        standard_map[int(idx_str)] = room_name
+                    except ValueError:
+                        continue
+
+            # 解析大模型响应中的匹配关系
+            lines = llm_response.split('\n')
+            for line in lines:
+                line = line.strip()
+
+                # 寻找匹配模式，如 "[1] → [3]" 或 "1 → 3" 或类似格式
+                patterns = [
+                    r'\[(\d+)\]\s*[→->]\s*\[(\d+)\]',  # [1] → [3]
+                    r'(\d+)\s*[→->]\s*(\d+)',           # 1 → 3
+                    r'\[(\d+)\]\s*[→->]\s*(\d+)',       # [1] → 3
+                    r'(\d+)\s*[→->]\s*\[(\d+)\]',       # 1 → [3]
+                ]
+
+                for pattern in patterns:
+                    matches = re.findall(pattern, line)
+                    for match in matches:
+                        try:
+                            supplier_idx = int(match[0])
+                            standard_idx = int(match[1])
+
+                            # 验证索引有效性
+                            if supplier_idx in unmatched_map and standard_idx in standard_map:
+                                matching_results.append({
+                                    'supplier_room': unmatched_map[supplier_idx],
+                                    'standard_room': standard_map[standard_idx],
+                                    'supplier_idx': supplier_idx,
+                                    'standard_idx': standard_idx
+                                })
+                        except ValueError:
+                            continue
+
+            logger.info(f"从LLM响应中解析出{len(matching_results)}个匹配关系")
+            return matching_results
+
+        except Exception as e:
+            logger.error(f"解析LLM匹配结果失败: {str(e)}")
+            return []
+
+    def save_matching_result_to_csv(self, hotel_id: str, hotel_name: str, matching_results: List[Dict[str, str]],
+                                    unmatched_rooms: List[str], output_dir: str = "output") -> str:
+        """将匹配结果保存到CSV文件
+
+        Args:
+            hotel_id: 酒店ID
+            hotel_name: 酒店名称
+            matching_results: 匹配结果列表
+            unmatched_rooms: 未匹配的房型列表
+            output_dir: 输出目录
+
+        Returns:
+            CSV文件路径
+        """
+        try:
+            # 确保输出目录存在
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            # 生成文件名（带时间戳）
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"llm_matching_result_{hotel_id}_{timestamp}.csv"
+            filepath = os.path.join(output_dir, filename)
+
+            # 创建匹配结果映射
+            matched_suppliers = {}
+            for result in matching_results:
+                matched_suppliers[result['supplier_room']
+                                  ] = result['standard_room']
+
+            # 写入CSV文件
+            with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+
+                # 写入标题行
+                writer.writerow(
+                    ['酒店ID', '酒店名称', '待匹配供应商房型+床型', '匹配的标准房型+床型', '匹配状态'])
+
+                # 解析未匹配房型列表并写入数据
+                for room_str in unmatched_rooms:
+                    if room_str.startswith('[') and ']:' in room_str:
+                        room_name = room_str.split(']:')[1].strip()
+
+                        # 检查是否有匹配结果
+                        if room_name in matched_suppliers:
+                            standard_room = matched_suppliers[room_name]
+                            status = "已匹配"
+                        else:
+                            standard_room = ""
+                            status = "未匹配"
+
+                        writer.writerow(
+                            [hotel_id, hotel_name, room_name, standard_room, status])
+
+            logger.info(f"匹配结果已保存到CSV文件: {filepath}")
+            return filepath
+
+        except Exception as e:
+            logger.error(f"保存CSV文件失败: {str(e)}")
+            return ""
+
     def format_room_types_for_prompt(self, extracted_data: Dict[str, Any]) -> Dict[str, List[str]]:
         """将房型数据格式化为结构化格式"""
         try:
@@ -788,6 +927,48 @@ class HttpInfoProcessor:
             # 4. 根据配置选择房型匹配方式（LLM直接调用 或 Agent方式）
             matching_result = self.process_room_matching(formatted_data)
 
+            # 5. 解析匹配结果并保存到CSV
+            csv_filepath = ""
+            parsed_matches = []
+
+            if matching_result.get("status") == "success":
+                try:
+                    # 获取大模型的响应文本
+                    llm_response_text = ""
+                    if matching_result.get("method") == "direct_llm_call":
+                        llm_response_text = matching_result.get(
+                            "llm_response", "")
+                    elif matching_result.get("method") == "agent_with_room_matching_tool":
+                        llm_response_text = matching_result.get(
+                            "agent_response", "")
+
+                    if llm_response_text:
+                        # 解析匹配结果
+                        unmatched_rooms = formatted_data.get(
+                            "unmatched_rooms", [])
+                        standard_rooms = formatted_data.get(
+                            "standard_rooms", [])
+
+                        parsed_matches = self.parse_llm_matching_result(
+                            llm_response_text, unmatched_rooms, standard_rooms)
+
+                        # 保存到CSV文件
+                        hotel_info = extracted_data.get("hotel_info", {})
+                        hotel_name = hotel_info.get("hotel_name", "未知酒店")
+
+                        csv_filepath = self.save_matching_result_to_csv(
+                            hotel_id=hotel_id or "unknown",
+                            hotel_name=hotel_name,
+                            matching_results=parsed_matches,
+                            unmatched_rooms=unmatched_rooms
+                        )
+
+                        logger.info(
+                            f"成功解析{len(parsed_matches)}个匹配关系并保存到CSV文件: {csv_filepath}")
+
+                except Exception as e:
+                    logger.error(f"解析和保存匹配结果时出错: {str(e)}")
+
             # 构建统一的结果格式
             result = {
                 "step": 1,
@@ -800,6 +981,11 @@ class HttpInfoProcessor:
                     "standard_count": len(extracted_data.get("standard_room_types", [])),
                     "matched_count": len(extracted_data.get("matched_pairs", [])),
                     "formatted_data": formatted_data
+                },
+                "csv_output": {
+                    "filepath": csv_filepath,
+                    "parsed_matches_count": len(parsed_matches),
+                    "parsed_matches": parsed_matches
                 },
                 "metadata": {
                     "hotel_id": hotel_id,

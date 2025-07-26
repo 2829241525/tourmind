@@ -5,12 +5,18 @@
 房型匹配批量处理脚本
 支持命令行参数和配置文件，可在后台运行
 """
-
-
-from deberta.inference import SimCSEPredictor
-from deberta.api_server import process_text_with_prefix, extract_english, DataCleaner
 import os
 import sys
+# 添加项目根目录到Python路径
+project_root = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from deberta.api_server import process_text_with_prefix, extract_english, DataCleaner
+from deberta.inference import SimCSEPredictor
+
+
 import json
 import logging
 import argparse
@@ -25,13 +31,9 @@ from dataclasses import dataclass
 import time
 import numpy as np
 
-# 添加项目根目录到Python路径
-project_root = os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))
-if project_root not in sys.path:
-    sys.path.append(project_root)
 
-# 使用绝对导入
+
+# 现在可以安全地导入deberta模块
 
 # 忽略SSL警告
 warnings.filterwarnings('ignore', category=InsecureRequestWarning)
@@ -49,8 +51,8 @@ DEFAULT_CONFIG = {
     "match_api_url": "http://10.0.0.110:8100/match",
     "api_base_url": "http://erp.tourmind.cn",
 
-    # 认证相关配置
-    "cookie": "admintools_user_session=MTc0NDAxMDI0M3xxdTF6ZVVlQnVKVXUwdjFXV3ZzRzFQbnN5cDVJZUFQQ19UWGN1MUg2dEdTc2dZSUJLei1NNzl5cGNtdTZWdlZURk9iVzZGckc3ZUE9fKn7QGE9aMwFe0r0uLrajme7fU-xK4WhGWsgqn5YB5sN",
+    # 认证相关配置admintools_user_session=MTc1MzQyODYwNHxJRzJJMV9GYmQzcTJnYk1XdkR2MWNzeW90T2htb09BdGRpWnNGVVBDRTY1SzRZMjFWYzNCNG9Sa3daNmNtb01hZGtxVTgyU21mbzA9fMvuZNO1iacMqlgld5vc1uDc0sba-FG3lLSzdHQDV7QS
+    "cookie": "admintools_user_session=MTc1MzQyODYwNHxJRzJJMV9GYmQzcTJnYk1XdkR2MWNzeW90T2htb09BdGRpWnNGVVBDRTY1SzRZMjFWYzNCNG9Sa3daNmNtb01hZGtxVTgyU21mbzA9fMvuZNO1iacMqlgld5vc1uDc0sba-FG3lLSzdHQDV7QS",
     "operator": "xiemingxuan",
     "referer": "http://erp.tourmind.cn/roomtypemapping/961935?supplierId=0&brt=tourmind&loadMaster=true",
 
@@ -116,7 +118,7 @@ class RoomTypeAPI:
                     params=params,
                     headers=headers,
                     verify=False,
-                    timeout=30
+                    timeout=240
                 )
                 self.logger.debug(f"API响应状态码: {response.status_code}")
                 return response.json()
@@ -302,7 +304,7 @@ class RoomTypeMatcher:
                     f"标准房型[{i}] ID:{room.get('SRoomID', '')}, 原文本:{room.get('RoomTypeName', '')}, 处理后:{text}")
 
             # 创建所有SPL房型与标准房型的配对组合
-            batch_size = 10000  # 使用更大的批次大小以提高处理速度
+            batch_size = 1000  # 使用更大的批次大小以提高处理速度
 
             # 准备所有配对
             all_text_pairs_a = []  # 所有SPL房型文本
@@ -730,12 +732,12 @@ def main():
 
     parser.add_argument('--config', type=str, default=None, help='配置文件路径')
     parser.add_argument(
-        '--hotels', type=str, default='/home/maxon/disk2/roomMatch/room_match/deberta/data/1000sampled_hotels.csv', help='酒店数据文件路径')
+        '--hotels', type=str, default='/home/maxon/disk2/roomMatch/room_match/deberta/data/1sampled_hotels.csv', help='酒店数据文件路径')
     parser.add_argument('--country', type=str, default=None, help='指定处理的国家代码')
     parser.add_argument('--max_hotels', type=int, default=5000, help='最大处理酒店数')
     parser.add_argument('--threshold', type=float, default=0.9, help='匹配阈值')
     parser.add_argument(
-        '--model', type=str, default='/home/maxon/disk2/roomMatch/room_match/deberta/checkpoints_cross_entropy', help='模型路径')
+        '--model', type=str, default='/home/maxon/disk2/roomMatch/room_match/deberta/checkpoints_cross_entropy_side_apartment_fix', help='模型路径')
     parser.add_argument(
         '--output', type=str, default='/home/maxon/disk2/roomMatch/room_match/deberta/output', help='输出目录')
 
