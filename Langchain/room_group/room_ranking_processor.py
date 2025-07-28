@@ -29,6 +29,9 @@ import threading
 import json
 from collections import defaultdict
 
+# 添加文件锁，用于多线程安全写入
+file_lock = threading.Lock()
+
 # 优先使用本地langchain源码
 LANGCHAIN_MASTER_PATH = "/home/maxon/disk2/roomMatch/room_match/Langchain/langchain-master"
 sys.path.insert(0, os.path.join(LANGCHAIN_MASTER_PATH, "libs", "langchain"))
@@ -40,7 +43,7 @@ sys.path.insert(0, os.path.join(
 BASE_CONFIG = {
     # 指定要处理的酒店ID列表，如果为None则按比例采样 [12395035, 25709125, 21109218]
     'hotel_ids': None,
-    #'hotel_ids': [12976637],
+    # 'hotel_ids': [12976637],
     'target_hotel_count': 3000,  # 采样目标酒店数量（当hotel_ids为None时使用）
     'max_workers': 5,  # 最大并发线程数
     'batch_size': 20  # 每批处理的房型对数量
@@ -77,6 +80,110 @@ class RoomRankingProcessor:
         self.llm_config = LLM_CONFIG['qwen']
         self._setup_llm()
         self._setup_prompt()
+        # 添加输出文件路径和已写入数据的追踪
+        self.output_file = None
+        self.written_data_cache = set()  # 缓存已写入的数据，避免重复
+
+    def _load_existing_data(self, output_file: str) -> set:
+        """加载已存在的CSV数据，用于去重检查"""
+        if not os.path.exists(output_file):
+            return set()
+
+        try:
+            existing_df = pd.read_csv(output_file)
+            written_data = set()
+
+            for _, row in existing_df.iterrows():
+                # 创建唯一标识符：酒店ID + 房型A + 房型B + 比较结果
+                key = (
+                    row['s_hotel_id'],
+                    row['room_a'],
+                    row['room_b'],
+                    row['comparison_result']
+                )
+                written_data.add(key)
+
+            logger.info(f"加载了 {len(written_data)} 条已存在的比较记录")
+            return written_data
+
+        except Exception as e:
+            logger.error(f"加载已存在数据失败: {str(e)}")
+            return set()
+
+    def _is_data_written(self, hotel_id: int, room_a: str, room_b: str, comparison_result: str) -> bool:
+        """检查数据是否已经写入过"""
+        key = (hotel_id, room_a, room_b, comparison_result)
+        reverse_key = (hotel_id, room_b, room_a, comparison_result)  # 考虑房型对的顺序
+
+        return key in self.written_data_cache or reverse_key in self.written_data_cache
+
+    def save_single_hotel_results(self, hotel_id: int, country_code: str,
+                                  comparison_results: List[Dict], output_file: str):
+        """保存单个酒店的排序结果（增量写入）"""
+        try:
+            with file_lock:  # 确保线程安全
+                # 准备新数据
+                new_data = []
+
+                if comparison_results:
+                    for comparison in comparison_results:
+                        room_a = comparison['room_a']
+                        room_b = comparison['room_b']
+                        result = comparison['comparison_result']
+
+                        # 检查是否已经写入过
+                        if not self._is_data_written(hotel_id, room_a, room_b, result):
+                            new_data.append({
+                                's_hotel_id': hotel_id,
+                                'country_code': country_code,
+                                'room_a': room_a,
+                                'room_b': room_b,
+                                'comparison_result': result,
+                                'reason': comparison['reason']
+                            })
+
+                            # 更新缓存
+                            key = (hotel_id, room_a, room_b, result)
+                            self.written_data_cache.add(key)
+                else:
+                    # 如果没有比较结果，记录错误（但也要检查是否已写入）
+                    if not self._is_data_written(hotel_id, '', '', 'ERROR'):
+                        new_data.append({
+                            's_hotel_id': hotel_id,
+                            'country_code': country_code,
+                            'room_a': '',
+                            'room_b': '',
+                            'comparison_result': 'ERROR',
+                            'reason': '处理失败或无比较结果'
+                        })
+
+                        # 更新缓存
+                        key = (hotel_id, '', '', 'ERROR')
+                        self.written_data_cache.add(key)
+
+                # 如果有新数据，写入文件
+                if new_data:
+                    new_df = pd.DataFrame(new_data)
+
+                    # 检查文件是否存在，决定是追加还是创建
+                    if os.path.exists(output_file):
+                        # 追加写入
+                        new_df.to_csv(output_file, mode='a',
+                                      header=False, index=False, encoding='utf-8')
+                        logger.info(
+                            f"✅ 酒店 {hotel_id}: 追加写入 {len(new_data)} 条新比较记录")
+                    else:
+                        # 创建新文件
+                        new_df.to_csv(output_file, mode='w',
+                                      header=True, index=False, encoding='utf-8')
+                        logger.info(
+                            f"✅ 酒店 {hotel_id}: 创建文件并写入 {len(new_data)} 条比较记录")
+                else:
+                    logger.info(f"📋 酒店 {hotel_id}: 所有数据已存在，跳过写入")
+
+        except Exception as e:
+            logger.error(f"保存酒店 {hotel_id} 结果失败: {str(e)}")
+            raise
 
     def _setup_llm(self):
         """设置大模型客户端"""
@@ -744,6 +851,14 @@ class RoomRankingProcessor:
             logger.info(
                 f"开始处理 {len(hotel_room_data)} 个酒店的房型排序，批次大小: {batch_size}")
 
+            # 初始化输出文件
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.output_file = f"/home/maxon/disk2/roomMatch/room_match/Langchain/room_group/data/room_ranking_results_{timestamp}.csv"
+
+            # 加载已存在的数据（如果有）
+            self.written_data_cache = self._load_existing_data(
+                self.output_file)
+
             results = {}
             all_validations = []
             processed_hotels = 0
@@ -760,7 +875,7 @@ class RoomRankingProcessor:
 
                 for batch_index, batch_pairs in enumerate(batches):
                     all_tasks.append(
-                        (hotel_id, batch_pairs, batch_index, room_pairs))
+                        (hotel_id, batch_pairs, batch_index, room_pairs, data['country']))
 
             logger.info(f"总计 {len(all_tasks)} 个批次任务")
 
@@ -772,8 +887,8 @@ class RoomRankingProcessor:
                         hotel_id,
                         batch_pairs,
                         batch_index
-                    ): (hotel_id, batch_pairs, batch_index, all_room_pairs)
-                    for hotel_id, batch_pairs, batch_index, all_room_pairs in all_tasks
+                    ): (hotel_id, batch_pairs, batch_index, all_room_pairs, country_code)
+                    for hotel_id, batch_pairs, batch_index, all_room_pairs, country_code in all_tasks
                 }
 
                 # 收集结果按酒店分组
@@ -781,14 +896,16 @@ class RoomRankingProcessor:
                 processed_batches = 0
 
                 for future in as_completed(future_to_task):
-                    hotel_id, batch_pairs, batch_index, all_room_pairs = future_to_task[future]
+                    hotel_id, batch_pairs, batch_index, all_room_pairs, country_code = future_to_task[
+                        future]
                     try:
                         hotel_id_result, llm_response, batch_index_result = future.result()
 
                         if hotel_id_result not in hotel_batch_results:
                             hotel_batch_results[hotel_id_result] = {
                                 'batches': {},
-                                'all_room_pairs': all_room_pairs
+                                'all_room_pairs': all_room_pairs,
+                                'country_code': country_code
                             }
 
                         # 解析批次结果
@@ -796,8 +913,18 @@ class RoomRankingProcessor:
                             comparison_results = self.parse_comparison_results(
                                 llm_response, batch_pairs)
                             hotel_batch_results[hotel_id_result]['batches'][batch_index_result] = comparison_results
+
+                            # 立即写入批次结果
+                            if comparison_results:
+                                self.save_single_hotel_results(
+                                    hotel_id_result,
+                                    country_code,
+                                    comparison_results,
+                                    self.output_file
+                                )
+
                             logger.info(
-                                f"酒店 {hotel_id_result} 批次 {batch_index_result} 完成: {len(comparison_results)}/{len(batch_pairs)} 个比较")
+                                f"酒店 {hotel_id_result} 批次 {batch_index_result} 完成并写入: {len(comparison_results)}/{len(batch_pairs)} 个比较")
                         else:
                             hotel_batch_results[hotel_id_result]['batches'][batch_index_result] = [
                             ]
@@ -815,13 +942,14 @@ class RoomRankingProcessor:
                         if hotel_id not in hotel_batch_results:
                             hotel_batch_results[hotel_id] = {
                                 'batches': {},
-                                'all_room_pairs': all_room_pairs
+                                'all_room_pairs': all_room_pairs,
+                                'country_code': country_code
                             }
                         hotel_batch_results[hotel_id]['batches'][batch_index] = [
                         ]
                         processed_batches += 1
 
-            # 合并每个酒店的所有批次结果
+            # 合并每个酒店的所有批次结果并进行校验
             for hotel_id, batch_data in hotel_batch_results.items():
                 all_comparisons = []
                 for batch_index in sorted(batch_data['batches'].keys()):
@@ -847,6 +975,15 @@ class RoomRankingProcessor:
             for hotel_id in hotel_room_data.keys():
                 if hotel_id not in results:
                     results[hotel_id] = []
+
+                    # 写入错误记录
+                    self.save_single_hotel_results(
+                        hotel_id,
+                        hotel_room_data[hotel_id]['country'],
+                        [],  # 空的比较结果
+                        self.output_file
+                    )
+
                     validation_result = {
                         'hotel_id': hotel_id,
                         'room_count': len(hotel_room_data[hotel_id]['rooms']),
@@ -861,6 +998,7 @@ class RoomRankingProcessor:
                     all_validations.append(validation_result)
 
             logger.info("所有酒店房型排序处理完成")
+            logger.info(f"📁 结果已实时写入到: {self.output_file}")
 
             # 输出整体校验摘要
             self.log_overall_validation_summary(all_validations)
@@ -967,7 +1105,7 @@ class RoomRankingProcessor:
                 logger.warning("没有找到有多个房型的酒店")
                 return None
 
-                # 输出期望比较数量的预览
+            # 输出期望比较数量的预览
             logger.info("📊 数量校验预览:")
             total_expected_comparisons = 0
 
@@ -981,18 +1119,15 @@ class RoomRankingProcessor:
 
             logger.info(f"🎯 总期望比较数量: {total_expected_comparisons}")
 
-            # 3. 处理房型排序
-            logger.info("第3步：处理房型排序")
+            # 3. 处理房型排序（结果会实时写入CSV）
+            logger.info("第3步：处理房型排序（实时写入结果）")
             ranking_results, validation_results = self.process_hotel_rankings(
                 hotel_room_data, max_workers, batch_size)
 
-            # 4. 保存结果
-            logger.info("第4步：保存结果")
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            output_file = f"/home/maxon/disk2/roomMatch/room_match/Langchain/room_group/data/room_ranking_results_{timestamp}.csv"
-            self.save_results(hotel_room_data, ranking_results,
-                              validation_results, output_file)
+            # 输出文件已经在process_hotel_rankings中实时生成
+            output_file = self.output_file
 
+            logger.info("✅ 所有结果已实时写入完成")
             return output_file
 
         except Exception as e:

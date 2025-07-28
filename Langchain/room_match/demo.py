@@ -34,156 +34,114 @@ def demo_http_info_processor():
     # 创建工作流实例
     workflow = RoomMatchingWorkflow()
 
-    # 步骤1参数 - 使用酒店ID
-    hotel_id = "2146988"  # 可以配置不同的酒店ID
-    # hotel_id = "799311"  # 可以配置不同的酒店ID
-    # hotel_id = "8789588"  # 可以配置不同的酒店ID
-    # hotel_id = "15896204"  # 可以配置不同的酒店ID
-    # hotel_id = "2424723"  # 可以配置不同的酒店ID
-    # hotel_id = "8527690"  # 可以配置不同的酒店ID
+    # 步骤1参数 - 使用酒店ID数组
+    hotel_ids = [
+        "2146988",   # 可以配置不同的酒店ID
+        "799311",    # 可以配置不同的酒店ID
+        "8789588",   # 可以配置不同的酒店ID
+        "15896204",  # 可以配置不同的酒店ID
+        "2424723",   # 可以配置不同的酒店ID
+        "8527690"    # 可以配置不同的酒店ID
+    ]
     step1_params = {
-        "hotel_id": hotel_id,
+        "hotel_ids": hotel_ids,
         "method": "GET"
     }
 
     try:
-        logger.info(f"执行步骤1: HTTP信息处理和规则抽取")
-        logger.info(f"使用酒店ID: {hotel_id}")
+        logger.info(f"执行步骤1: HTTP信息处理和规则抽取（批量处理）")
+        logger.info(f"处理酒店ID列表: {hotel_ids}")
 
-        # 使用工作流执行单个步骤
-        result = workflow.execute_single_step(1, **step1_params)
+        # 使用工作流执行批量处理
+        result = workflow.execute_batch_step(1, **step1_params)
 
         if result.get('status') == 'success':
-            logger.info("✅ 步骤1执行成功")
+            logger.info("✅ 批量处理执行成功")
 
             # 输出详细结果
             print("\n" + "="*80)
-            print("HTTP信息处理器执行结果")
+            print("HTTP信息处理器批量执行结果")
             print("="*80)
 
-            # 基本信息
-            summary = result.get('room_data_summary', {})
-            hotel_info = summary.get('hotel_info', {})
+            # 批量处理统计
+            batch_summary = result.get('batch_summary', {})
+            print(f"\n📊 批量处理统计:")
+            print(f"   处理酒店数量: {batch_summary.get('total_hotels', 0)}个")
+            print(f"   成功处理: {batch_summary.get('successful_hotels', 0)}个")
+            print(f"   失败处理: {batch_summary.get('failed_hotels', 0)}个")
+            print(f"   成功率: {batch_summary.get('success_rate', '0%')}")
 
-            print(f"\n🏨 酒店信息:")
-            print(f"   酒店ID: {hotel_info.get('hotel_id', 'N/A')}")
-            print(f"   酒店名称: {hotel_info.get('hotel_name', 'N/A')}")
-            print(f"   英文名称: {hotel_info.get('hotel_name_en', 'N/A')}")
-            print(f"   城市: {hotel_info.get('city', 'N/A')}")
+            # 显示每个酒店的处理结果摘要
+            hotel_results = result.get('hotel_results', [])
+            for hotel_result in hotel_results:
+                hotel_id = hotel_result.get('hotel_id', 'Unknown')
+                status = hotel_result.get('status', 'unknown')
 
-            print(f"\n📊 房型数据统计:")
-            print(f"   未匹配供应商房型: {summary.get('unmatched_count', 0)}个")
-            print(f"   标准房型: {summary.get('standard_count', 0)}个")
-            print(f"   已匹配案例: {summary.get('matched_count', 0)}个")
+                if status == 'success':
+                    summary = hotel_result.get('room_data_summary', {})
+                    hotel_info = summary.get('hotel_info', {})
 
-            # 显示格式化的房型数据
-            formatted_data = summary.get('formatted_data', {})
-            if formatted_data:
-                print(f"\n📝 格式化房型数据:")
-                print("="*60)
-
-                matched_examples = formatted_data.get('matched_examples', [])
-                if matched_examples:
-                    print("已匹配案例参考:")
-                    for example in matched_examples:
-                        print(f"  {example}")
-                    print()
-
-                unmatched_rooms = formatted_data.get('unmatched_rooms', [])
-                if unmatched_rooms:
-                    print("待匹配的供应商房型:")
-                    for room in unmatched_rooms:
-                        print(f"  {room}")
-                    print()
-
-                standard_rooms = formatted_data.get('standard_rooms', [])
-                if standard_rooms:
-                    print("可选择的标准房型:")
-                    for room in standard_rooms:
-                        print(f"  {room}")
-
-                print("="*60)
-
-            # 显示格式化的prompt
-            formatted_prompt = result.get('formatted_prompt', '')
-            if formatted_prompt:
-                print(f"\n📝 转换后的完整Prompt:")
-                print("="*60)
-                print(formatted_prompt)
-                print("="*60)
-
-            # 显示大模型生成的规则
-            elapsed_time = result.get('elapsed_time', 0)
-            print(f"\n🔧 大模型生成的匹配规则 (耗时: {elapsed_time:.2f}秒):")
-            print("="*60)
-            print(result.get('llm_response', ''))
-            print(result.get('agent_query', ''))
-            print(result.get('agent_response', ''))
-            print("="*60)
-
-            # 显示CSV输出信息
-            csv_output = result.get('csv_output', {})
-            if csv_output:
-                print(f"\n📄 CSV输出结果:")
-                print("="*60)
-                csv_filepath = csv_output.get('filepath', '')
-                parsed_matches_count = csv_output.get(
-                    'parsed_matches_count', 0)
-                parsed_matches = csv_output.get('parsed_matches', [])
-
-                if csv_filepath:
-                    print(f"   CSV文件路径: {csv_filepath}")
-                    print(f"   解析的匹配关系数量: {parsed_matches_count}")
-
-                    if parsed_matches:
-                        print(f"\n   解析出的匹配关系:")
-                        # 只显示前10个
-                        for i, match in enumerate(parsed_matches[:10], 1):
-                            supplier_room = match.get('supplier_room', '')
-                            standard_room = match.get('standard_room', '')
-                            print(
-                                f"     [{i}] {supplier_room} → {standard_room}")
-
-                        if len(parsed_matches) > 10:
-                            print(
-                                f"     ... 还有{len(parsed_matches) - 10}个匹配关系")
-
-                    # 尝试读取并显示CSV文件的前几行
-                    try:
-                        import csv
-                        print(f"\n   CSV文件内容预览:")
-                        with open(csv_filepath, 'r', encoding='utf-8') as f:
-                            csv_reader = csv.reader(f)
-                            rows = list(csv_reader)
-
-                            # 显示表头
-                            if rows:
-                                headers = rows[0]
-                                print(f"     表头: {' | '.join(headers)}")
-
-                                # 显示前5行数据
-                                data_rows = rows[1:6] if len(rows) > 1 else []
-                                for i, row in enumerate(data_rows, 1):
-                                    print(f"     数据[{i}]: {' | '.join(row)}")
-
-                                if len(rows) > 6:
-                                    print(f"     ... CSV文件共包含{len(rows)-1}行数据")
-
-                    except Exception as e:
-                        print(f"     读取CSV文件时出错: {str(e)}")
-
+                    print(f"\n🏨 酒店 {hotel_id} - 处理成功:")
+                    print(f"   酒店名称: {hotel_info.get('hotel_name', 'N/A')}")
+                    print(f"   英文名称: {hotel_info.get('hotel_name_en', 'N/A')}")
+                    print(f"   城市: {hotel_info.get('city', 'N/A')}")
+                    print(
+                        f"   输入-未匹配房型: {summary.get('input_unmatched_count', 0)}个")
+                    print(
+                        f"   输入-标准房型: {summary.get('input_standard_count', 0)}个")
+                    print(
+                        f"   输入-已匹配案例: {summary.get('input_matched_pairs_count', 0)}个")
+                    print(
+                        f"   LLM-成功匹配: {summary.get('llm_successful_matches', 0)}个")
+                    print(
+                        f"   LLM-无法匹配: {summary.get('llm_unsuccessful_matches', 0)}个")
+                    print(
+                        f"   LLM-成功率: {summary.get('llm_success_rate', '0%')}")
                 else:
-                    print("   未生成CSV文件")
+                    error_msg = hotel_result.get('error', '未知错误')
+                    print(f"\n❌ 酒店 {hotel_id} - 处理失败: {error_msg}")
 
-                print("="*60)
+            # 显示合并的CSV输出信息
+            csv_path = result.get('merged_csv_path', '')
+            if csv_path:
+                print(f"\n📄 所有酒店的匹配结果已合并保存到CSV文件:")
+                print(f"   文件路径: {csv_path}")
 
-            print(f"\n✅ HTTP信息处理器测试完成")
+                # 检查文件是否存在并显示文件大小
+                if os.path.exists(csv_path):
+                    file_size = os.path.getsize(csv_path)
+                    print(f"   文件大小: {file_size} 字节")
+
+                    # 尝试读取并显示前几行
+                    try:
+                        import pandas as pd
+                        df = pd.read_csv(csv_path)
+                        print(f"   总记录数量: {len(df)} 条")
+
+                        # 按酒店ID统计
+                        if '酒店ID' in df.columns:
+                            hotel_counts = df['酒店ID'].value_counts()
+                            print(f"   各酒店记录数:")
+                            for hotel_id, count in hotel_counts.items():
+                                print(f"     酒店 {hotel_id}: {count} 条")
+
+                        if len(df) > 0:
+                            print(f"\n📋 合并CSV文件内容预览（前10行）:")
+                            print(df.head(10).to_string(index=False))
+                    except Exception as e:
+                        print(f"   读取CSV文件时出错: {str(e)}")
+                else:
+                    print(f"   ⚠️  警告: 合并CSV文件不存在")
+            else:
+                print(f"\n⚠️  警告: 未生成合并CSV文件")
+
+            print(f"\n✅ HTTP信息处理器批量测试完成")
             return result
 
         else:
             error_msg = result.get('error', '未知错误')
-            logger.error(f"❌ 步骤1执行失败: {error_msg}")
-            print(f"\n❌ 测试失败: {error_msg}")
+            logger.error(f"❌ 批量处理执行失败: {error_msg}")
+            print(f"\n❌ 批量测试失败: {error_msg}")
             return result
 
     except Exception as e:

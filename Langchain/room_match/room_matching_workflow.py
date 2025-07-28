@@ -223,6 +223,45 @@ class RoomMatchingWorkflow:
             logger.error(f"步骤{step_number}执行失败: {str(e)}")
             return self._create_error_result(f"步骤{step_number}执行异常", {"error": str(e)})
 
+    def execute_batch_step(self, step_number: int, **kwargs) -> Dict[str, Any]:
+        """
+        批量执行工作流中的某个步骤
+
+        Args:
+            step_number: 步骤编号 (1-4)
+            **kwargs: 步骤参数，对于步骤1，需要包含hotel_ids参数
+
+        Returns:
+            批量执行结果
+        """
+        try:
+            logger.info(f"执行批量步骤: 步骤{step_number}")
+
+            if step_number == 1:
+                # 批量处理HTTP信息处理步骤
+                hotel_ids = kwargs.pop('hotel_ids', [])  # 使用pop避免参数重复
+                if not hotel_ids:
+                    return self._create_error_result("批量处理需要提供hotel_ids参数", {"step_number": step_number})
+
+                result = self.step1_processor.execute_batch_step(
+                    hotel_ids=hotel_ids, **kwargs)
+
+            elif step_number == 2:
+                return self._create_error_result("步骤2暂不支持批量处理", {"step_number": step_number})
+            elif step_number == 3:
+                return self._create_error_result("步骤3暂不支持批量处理", {"step_number": step_number})
+            elif step_number == 4:
+                return self._create_error_result("步骤4暂不支持批量处理", {"step_number": step_number})
+            else:
+                return self._create_error_result("无效步骤编号", {"step_number": step_number})
+
+            logger.info(f"批量步骤{step_number}执行完成")
+            return result
+
+        except Exception as e:
+            logger.error(f"批量步骤{step_number}执行失败: {str(e)}")
+            return self._create_error_result(f"批量步骤{step_number}执行异常", {"error": str(e)})
+
     def get_workflow_state(self) -> Dict[str, Any]:
         """获取当前工作流状态"""
         return self.workflow_state.copy()
