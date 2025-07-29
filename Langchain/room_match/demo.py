@@ -36,12 +36,16 @@ def demo_http_info_processor():
 
     # 步骤1参数 - 使用酒店ID数组
     hotel_ids = [
-        "2146988",   # 可以配置不同的酒店ID
-        "799311",    # 可以配置不同的酒店ID
-        "8789588",   # 可以配置不同的酒店ID
-        "15896204",  # 可以配置不同的酒店ID
-        "2424723",   # 可以配置不同的酒店ID
-        "8527690"    # 可以配置不同的酒店ID
+        "823253",   # 可以配置不同的酒店ID
+        # "764289",   # 可以配置不同的酒店ID
+        # "739565",   # 可以配置不同的酒店ID
+        # "812020",   # 可以配置不同的酒店ID
+        # "2146988",   # 可以配置不同的酒店ID
+        # "799311",    # 可以配置不同的酒店ID
+        # "8789588",   # 可以配置不同的酒店ID
+        # # "15896204",  # 可以配置不同的酒店ID
+        # "2424723",   # 可以配置不同的酒店ID
+        # "8527690"    # 可以配置不同的酒店ID
     ]
     step1_params = {
         "hotel_ids": hotel_ids,
@@ -101,7 +105,7 @@ def demo_http_info_processor():
                     error_msg = hotel_result.get('error', '未知错误')
                     print(f"\n❌ 酒店 {hotel_id} - 处理失败: {error_msg}")
 
-            # 显示合并的CSV输出信息
+                    # 显示合并的匹配结果CSV输出信息
             csv_path = result.get('merged_csv_path', '')
             if csv_path:
                 print(f"\n📄 所有酒店的匹配结果已合并保存到CSV文件:")
@@ -121,19 +125,60 @@ def demo_http_info_processor():
                         # 按酒店ID统计
                         if '酒店ID' in df.columns:
                             hotel_counts = df['酒店ID'].value_counts()
-                            print(f"   各酒店记录数:")
+                            print(f"   各酒店匹配结果记录数:")
                             for hotel_id, count in hotel_counts.items():
                                 print(f"     酒店 {hotel_id}: {count} 条")
 
                         if len(df) > 0:
-                            print(f"\n📋 合并CSV文件内容预览（前10行）:")
+                            print(f"\n📋 合并匹配结果CSV文件内容预览（前10行）:")
                             print(df.head(10).to_string(index=False))
                     except Exception as e:
-                        print(f"   读取CSV文件时出错: {str(e)}")
+                        print(f"   读取匹配结果CSV文件时出错: {str(e)}")
                 else:
-                    print(f"   ⚠️  警告: 合并CSV文件不存在")
+                    print(f"   ⚠️  警告: 合并匹配结果CSV文件不存在")
             else:
-                print(f"\n⚠️  警告: 未生成合并CSV文件")
+                print(f"\n⚠️  警告: 未生成合并匹配结果CSV文件")
+
+            # 显示合并的输入数据CSV输出信息
+            input_csv_path = result.get('merged_input_csv_path', '')
+            if input_csv_path:
+                print(f"\n📋 所有酒店的输入数据已合并保存到CSV文件:")
+                print(f"   文件路径: {input_csv_path}")
+
+                # 检查文件是否存在并显示文件大小
+                if os.path.exists(input_csv_path):
+                    file_size = os.path.getsize(input_csv_path)
+                    print(f"   文件大小: {file_size} 字节")
+
+                    # 尝试读取并显示前几行
+                    try:
+                        import pandas as pd
+                        input_df = pd.read_csv(input_csv_path)
+                        print(f"   总记录数量: {len(input_df)} 条")
+
+                        # 按酒店ID统计
+                        if '酒店ID' in input_df.columns:
+                            hotel_counts = input_df['酒店ID'].value_counts()
+                            print(f"   各酒店输入数据记录数:")
+                            for hotel_id, count in hotel_counts.items():
+                                print(f"     酒店 {hotel_id}: {count} 条")
+
+                        # 按数据类型统计
+                        if '数据类型' in input_df.columns:
+                            data_type_counts = input_df['数据类型'].value_counts()
+                            print(f"   按数据类型统计:")
+                            for data_type, count in data_type_counts.items():
+                                print(f"     {data_type}: {count} 条")
+
+                        if len(input_df) > 0:
+                            print(f"\n📋 合并输入数据CSV文件内容预览（前10行）:")
+                            print(input_df.head(10).to_string(index=False))
+                    except Exception as e:
+                        print(f"   读取输入数据CSV文件时出错: {str(e)}")
+                else:
+                    print(f"   ⚠️  警告: 合并输入数据CSV文件不存在")
+            else:
+                print(f"\n⚠️  警告: 未生成合并输入数据CSV文件")
 
             print(f"\n✅ HTTP信息处理器批量测试完成")
             return result

@@ -362,6 +362,95 @@ class HttpInfoProcessor:
             logger.error(f"保存CSV文件失败: {str(e)}")
             return ""
 
+    def save_input_data_to_csv(self, extracted_data: Dict[str, Any], hotel_id: str) -> str:
+        """将输入数据（未匹配房型和标准房型）保存到CSV文件
+
+        Args:
+            extracted_data: 提取的房型数据
+            hotel_id: 酒店ID
+
+        Returns:
+            保存的CSV文件路径
+        """
+        try:
+            # 生成时间戳
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # 确保output目录存在
+            output_dir = os.path.join(
+                os.path.dirname(__file__), '..', 'output')
+            os.makedirs(output_dir, exist_ok=True)
+
+            # 生成文件名
+            csv_filename = f"input_data_{hotel_id}_{timestamp}.csv"
+            csv_path = os.path.join(output_dir, csv_filename)
+
+            # 准备CSV数据
+            csv_data = []
+
+            # 获取酒店信息
+            hotel_info = extracted_data.get("hotel_info", {})
+
+            # 处理未匹配的供应商房型
+            unmatched_rooms = extracted_data.get(
+                "unmatched_supplier_rooms", [])
+            for i, room in enumerate(unmatched_rooms, 1):
+                csv_data.append({
+                    '酒店ID': hotel_info.get('hotel_id', hotel_id),
+                    '数据类型': '待匹配供应商房型',
+                    '房型+床型名称': room.get('combined_name', ''),
+                    '备注': '需要匹配到标准房型'
+                })
+
+            # 处理标准房型
+            standard_rooms = extracted_data.get("standard_room_types", [])
+            for i, room in enumerate(standard_rooms, 1):
+                csv_data.append({
+                    '酒店ID': hotel_info.get('hotel_id', hotel_id),
+                    '数据类型': '标准房型',
+                    '房型+床型名称': room.get('combined_name', ''),
+                    '备注': '可供匹配的标准房型选项'
+                })
+
+            # 处理已匹配的案例
+            matched_pairs = extracted_data.get("matched_pairs", [])
+            for i, pair in enumerate(matched_pairs, 1):
+                csv_data.append({
+                    '酒店ID': hotel_info.get('hotel_id', hotel_id),
+                    '数据类型': '已匹配案例',
+                    '房型+床型名称': f"{pair['supplier_room']['combined_name']} → {pair['standard_room']['combined_name']}",
+                    '备注': '历史匹配案例，供参考'
+                })
+
+            # 如果没有任何数据，创建一个空的CSV文件
+            if not csv_data:
+                csv_data.append({
+                    '酒店ID': hotel_id,
+                    '数据类型': '',
+                    '房型+床型名称': '',
+                    '备注': '无数据'
+                })
+                logger.warning("没有找到输入数据，创建空的CSV文件")
+
+            # 保存到CSV文件
+            df = pd.DataFrame(csv_data)
+            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
+            unmatched_count = len(unmatched_rooms)
+            standard_count = len(standard_rooms)
+            matched_count = len(matched_pairs)
+            total_records = len(csv_data)
+
+            logger.info(f"输入数据已保存到CSV文件: {csv_path}")
+            logger.info(
+                f"共保存{total_records}条记录：待匹配{unmatched_count}条，标准房型{standard_count}条，已匹配案例{matched_count}条")
+
+            return csv_path
+
+        except Exception as e:
+            logger.error(f"保存输入数据CSV文件失败: {str(e)}")
+            return ""
+
     def _setup_llm(self):
         """设置大模型客户端"""
         # 设置环境变量
@@ -938,6 +1027,7 @@ class HttpInfoProcessor:
                 logger.info("使用LLM直接调用方式进行房型匹配")
                 result = self.generate_extraction_rules_with_llm(
                     formatted_data)
+                print(result.get("formatted_prompt", ""))
                 # 标准化返回格式
                 return {
                     "status": "success",
@@ -1064,6 +1154,16 @@ class HttpInfoProcessor:
             if "error" in extracted_data:
                 return {"step": 1, "status": "error", "error": extracted_data["error"]}
 
+            # 2.5. 保存输入数据到CSV文件（在输入大模型前）
+            input_csv_path = ""
+            try:
+                input_csv_path = self.save_input_data_to_csv(
+                    extracted_data, hotel_id or "unknown")
+                if input_csv_path:
+                    logger.info(f"✅ 输入数据已保存到CSV: {input_csv_path}")
+            except Exception as input_csv_error:
+                logger.warning(f"保存输入数据CSV失败: {str(input_csv_error)}")
+
             # 3. 格式化为结构化数据
             formatted_data = self.format_room_types_for_prompt(extracted_data)
 
@@ -1126,7 +1226,8 @@ class HttpInfoProcessor:
                 "status": "success",
                 "matching_method": matching_result.get("method", "unknown"),
                 "matching_status": matching_result.get("status", "unknown"),
-                "csv_output_path": csv_path,  # 新增CSV文件路径
+                "csv_output_path": csv_path,  # 匹配结果CSV文件路径
+                "input_csv_path": input_csv_path,  # 输入数据CSV文件路径
                 "room_data_summary": {
                     "hotel_info": extracted_data.get("hotel_info", {}),
                     "input_unmatched_count": len(extracted_data.get("unmatched_supplier_rooms", [])),
@@ -1184,6 +1285,7 @@ class HttpInfoProcessor:
 
             all_hotel_results = []
             all_matching_results = []
+            all_input_data_results = []  # 新增：存储输入数据
             successful_count = 0
             failed_count = 0
 
@@ -1221,7 +1323,20 @@ class HttpInfoProcessor:
                                         f"从酒店 {hotel_id} 提取了 {len(df)} 条匹配结果")
                             except Exception as csv_error:
                                 logger.warning(
-                                    f"读取酒店 {hotel_id} 的CSV文件失败: {str(csv_error)}")
+                                    f"读取酒店 {hotel_id} 的匹配结果CSV文件失败: {str(csv_error)}")
+
+                        # 提取输入数据用于合并
+                        if single_result.get('input_csv_path'):
+                            try:
+                                input_df = pd.read_csv(
+                                    single_result['input_csv_path'])
+                                if len(input_df) > 0:
+                                    all_input_data_results.append(input_df)
+                                    logger.info(
+                                        f"从酒店 {hotel_id} 提取了 {len(input_df)} 条输入数据")
+                            except Exception as input_csv_error:
+                                logger.warning(
+                                    f"读取酒店 {hotel_id} 的输入数据CSV文件失败: {str(input_csv_error)}")
                     else:
                         failed_count += 1
                         error_msg = single_result.get('error', '未知错误')
@@ -1261,20 +1376,62 @@ class HttpInfoProcessor:
                         merged_csv_path, index=False, encoding='utf-8-sig')
 
                     logger.info(f"✅ 所有酒店匹配结果已合并保存到: {merged_csv_path}")
-                    logger.info(f"合并CSV包含 {len(merged_df)} 条记录")
+                    logger.info(f"合并匹配结果CSV包含 {len(merged_df)} 条记录")
 
                     # 统计各酒店的记录数
                     if '酒店ID' in merged_df.columns:
                         hotel_counts = merged_df['酒店ID'].value_counts()
-                        logger.info("各酒店记录数统计:")
+                        logger.info("各酒店匹配结果记录数统计:")
                         for hotel_id, count in hotel_counts.items():
                             logger.info(f"  酒店 {hotel_id}: {count} 条")
 
                 except Exception as merge_error:
-                    logger.error(f"合并CSV文件失败: {str(merge_error)}")
+                    logger.error(f"合并匹配结果CSV文件失败: {str(merge_error)}")
                     merged_csv_path = ""
             else:
-                logger.warning("没有找到任何匹配结果，无法创建合并CSV文件")
+                logger.warning("没有找到任何匹配结果，无法创建合并匹配结果CSV文件")
+
+            # 合并所有输入数据到一个CSV文件
+            merged_input_csv_path = ""
+            if all_input_data_results:
+                try:
+                    # 合并所有输入数据DataFrame
+                    merged_input_df = pd.concat(
+                        all_input_data_results, ignore_index=True)
+
+                    # 生成合并输入数据CSV文件路径
+                    input_csv_filename = f"batch_input_data_{len(hotel_ids)}hotels_{timestamp}.csv"
+                    merged_input_csv_path = os.path.join(
+                        output_dir, input_csv_filename)
+
+                    # 保存合并的输入数据CSV文件
+                    merged_input_df.to_csv(
+                        merged_input_csv_path, index=False, encoding='utf-8-sig')
+
+                    logger.info(f"✅ 所有酒店输入数据已合并保存到: {merged_input_csv_path}")
+                    logger.info(f"合并输入数据CSV包含 {len(merged_input_df)} 条记录")
+
+                    # 统计各酒店的输入数据记录数
+                    if '酒店ID' in merged_input_df.columns:
+                        input_hotel_counts = merged_input_df['酒店ID'].value_counts(
+                        )
+                        logger.info("各酒店输入数据记录数统计:")
+                        for hotel_id, count in input_hotel_counts.items():
+                            logger.info(f"  酒店 {hotel_id}: {count} 条")
+
+                    # 按数据类型统计
+                    if '数据类型' in merged_input_df.columns:
+                        data_type_counts = merged_input_df['数据类型'].value_counts(
+                        )
+                        logger.info("按数据类型统计:")
+                        for data_type, count in data_type_counts.items():
+                            logger.info(f"  {data_type}: {count} 条")
+
+                except Exception as input_merge_error:
+                    logger.error(f"合并输入数据CSV文件失败: {str(input_merge_error)}")
+                    merged_input_csv_path = ""
+            else:
+                logger.warning("没有找到任何输入数据，无法创建合并输入数据CSV文件")
 
             # 计算成功率
             total_hotels = len(hotel_ids)
@@ -1292,7 +1449,8 @@ class HttpInfoProcessor:
                     "processed_hotel_ids": hotel_ids
                 },
                 "hotel_results": all_hotel_results,
-                "merged_csv_path": merged_csv_path,
+                "merged_csv_path": merged_csv_path,  # 合并的匹配结果CSV路径
+                "merged_input_csv_path": merged_input_csv_path,  # 合并的输入数据CSV路径
                 "metadata": {
                     "batch_processing": True,
                     "method": method,
