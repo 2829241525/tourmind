@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DeBERTa训练器模块
+DeBERTa训练器模块 - 房间比较三分类任务
 实现了用于训练DeBERTa模型的训练器类
 """
 
@@ -20,8 +20,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 from models.model import create_model
-from models.loss import create_loss_fn
-from data.dataset import RoomMatchTripletDataset, RoomMatchValidationDataset
+from data.dataset import RoomComparisonDataset
 from utils.logger import TrainingLogger
 
 # 配置日志记录
@@ -61,7 +60,7 @@ def clear_gpu_memory():
 
 
 class DeBERTaTrainer:
-    """DeBERTa模型训练器"""
+    """DeBERTa模型训练器 - 房间比较三分类任务"""
 
     def __init__(self, config_path: str, config_override=None):
         """
@@ -115,35 +114,20 @@ class DeBERTaTrainer:
             real_time_plot=False
         )
 
-        # 使用更小的学习率防止梯度爆炸和NaN问题
-        self.default_learning_rate = self.config.get('learning_rate', 2e-5)
-        if self.config.get('reduce_learning_rate_for_nan', False):
-            self.config['learning_rate'] = self.config.get(
-                'learning_rate', 2e-5) * 0.1
-            logger.info(
-                f"启用降低学习率以防止NaN问题，学习率从 {self.default_learning_rate} 降低到 {self.config['learning_rate']}")
-
         # 训练开始前清理显存并打印状态
         clear_gpu_memory()
         print_gpu_memory()
 
-        # 获取损失函数类型
-        self.loss_type = self.config.get('loss_type', 'cross_entropy')
-        logger.info(f"使用损失函数类型: {self.loss_type}")
+        # 设置三分类模型
+        num_labels = 3  # HIGHER, LOWER, INCOMPARABLE
 
         # 检查是否存在之前训练的最佳模型
         best_model_path = os.path.join(self.config['save_dir'], 'best_model')
         if os.path.exists(best_model_path):
             logger.info(f"找到已有的最佳模型，正在加载: {best_model_path}")
-
-            # 根据损失函数类型选择模型类型
-            if self.loss_type == 'triplet':
-                self.model = create_model('encoder', best_model_path)
-            else:
-                class_weights = self.config.get('class_weights', None)
-                self.model = create_model(
-                    'classifier', best_model_path, num_labels=2, class_weights=class_weights)
-
+            class_weights = self.config.get('class_weights', None)
+            self.model = create_model(
+                'classifier', best_model_path, num_labels=num_labels, class_weights=class_weights)
             self.tokenizer = AutoTokenizer.from_pretrained(best_model_path)
         else:
             logger.info("未找到已有模型，从预训练模型初始化")
@@ -151,19 +135,14 @@ class DeBERTaTrainer:
             model_path = self.config.get(
                 'pretrained_model', "microsoft/deberta-v3-base")
 
-            # 根据损失函数类型选择模型类型
-            if self.loss_type == 'triplet':
-                self.model = create_model('encoder', model_path)
-            else:
-                class_weights = self.config.get('class_weights', None)
-                self.model = create_model(
-                    'classifier', model_path, num_labels=2, class_weights=class_weights)
-
+            class_weights = self.config.get('class_weights', None)
+            self.model = create_model(
+                'classifier', model_path, num_labels=num_labels, class_weights=class_weights)
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
             # 启用梯度检查点以节省显存（根据配置）
             enable_gradient_checkpointing = self.config.get(
-                'enable_gradient_checkpointing', True)
+                'enable_gradient_checkpointing', False)
             if enable_gradient_checkpointing:
                 if hasattr(self.model, 'model'):
                     self.model.model.gradient_checkpointing_enable()
@@ -176,17 +155,6 @@ class DeBERTaTrainer:
         # 将模型移动到设备上
         self.model.to(self.device)
 
-        # 创建损失函数
-        if self.loss_type == 'triplet':
-            self.criterion = create_loss_fn(
-                'triplet',
-                margin=self.config.get('margin', 0.3),
-                reduction=self.config.get('reduction', 'mean')
-            )
-        else:
-            # 对于cross_entropy，使用模型的内置损失函数
-            self.criterion = None
-
         # 创建优化器
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -196,7 +164,7 @@ class DeBERTaTrainer:
         )
 
         # 初始化混合精度训练的 scaler
-        self.scaler = GradScaler()
+        self.scaler = GradScaler(device='cuda')
 
         # 早停相关参数
         if 'early_stopping' in self.config and isinstance(self.config['early_stopping'], dict):
@@ -211,34 +179,6 @@ class DeBERTaTrainer:
 
         self.best_valid_loss = float('inf')
         self.current_epoch = 0
-
-    def encode_text(self, texts, train=True):
-        """
-        将单个文本编码为向量
-
-        Args:
-            texts: 文本列表
-            train: 是否处于训练模式
-
-        Returns:
-            torch.Tensor: 文本的向量表示
-        """
-        max_length = self.config.get('max_length', 256)
-        encoded = self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors='pt'
-        )
-        encoded = {k: v.to(self.device) for k, v in encoded.items()}
-
-        if train:
-            embeddings = self.model(**encoded)
-        else:
-            with torch.no_grad():
-                embeddings = self.model(**encoded)
-        return embeddings
 
     def train_epoch(self, train_loader):
         """
@@ -260,7 +200,7 @@ class DeBERTaTrainer:
         max_grad_norm = self.config.get('max_grad_norm', 1.0)
 
         # 是否使用混合精度训练
-        use_fp16 = self.config.get('fp16', True)
+        use_fp16 = self.config.get('fp16', False)
 
         # 获取日志记录步数
         logging_steps = self.config.get('logging_steps', 100)
@@ -280,125 +220,68 @@ class DeBERTaTrainer:
         )
 
         for batch_idx, batch in enumerate(progress_bar):
-            # 使用混合精度训练
+            # 准备输入数据
+            inputs = self.tokenizer(
+                batch['text1'],
+                text_pair=batch['text2'],
+                padding=True,
+                truncation=True,
+                max_length=self.config.get('max_length', 256),
+                return_tensors='pt'
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            labels = batch['label'].to(self.device)
+            inputs['labels'] = labels
+
+            # 前向传播和反向传播
             if use_fp16:
+                # 使用混合精度训练
                 with autocast(device_type='cuda'):
-                    if self.loss_type == 'triplet':
-                        # 对于triplet loss，使用三元组格式的数据
-                        anchor_embeddings = self.encode_text(
-                            batch['anchor_text'], train=True)
-                        positive_embeddings = self.encode_text(
-                            batch['positive_text'], train=True)
-                        negative_embeddings = self.encode_text(
-                            batch['negative_text'], train=True)
-                        loss = self.criterion(
-                            anchor_embeddings, positive_embeddings, negative_embeddings)
-                    else:
-                        # 对于cross_entropy，使用AutoModelForSequenceClassification
-                        # 准备输入数据
-                        inputs = self.tokenizer(
-                            batch['text1'],
-                            text_pair=batch['text2'],
-                            padding=True,
-                            truncation=True,
-                            max_length=self.config.get('max_length', 256),
-                            return_tensors='pt'
-                        )
-                        inputs = {k: v.to(self.device)
-                                  for k, v in inputs.items()}
-                        labels = batch['label'].to(self.device)
-                        inputs['labels'] = labels
-
-                        # 前向传播
-                        outputs = self.model(**inputs)
-                        loss = outputs.loss
-
-                        # 收集预测和标签用于计算指标
-                        if self.loss_type != 'triplet':
-                            logits = outputs.logits
-                            predictions = torch.argmax(logits, dim=1)
-                            all_predictions.extend(predictions.cpu().numpy())
-                            all_labels.extend(labels.cpu().numpy())
-
-                    # 根据梯度累积步数缩放损失
-                    loss = loss / grad_accum_steps
-            else:
-                # 不使用混合精度训练
-                if self.loss_type == 'triplet':
-                    # 对于triplet loss，使用三元组格式的数据
-                    anchor_embeddings = self.encode_text(
-                        batch['anchor_text'], train=True)
-                    positive_embeddings = self.encode_text(
-                        batch['positive_text'], train=True)
-                    negative_embeddings = self.encode_text(
-                        batch['negative_text'], train=True)
-                    loss = self.criterion(
-                        anchor_embeddings, positive_embeddings, negative_embeddings)
-                else:
-                    # 对于cross_entropy，使用AutoModelForSequenceClassification
-                    # 准备输入数据
-                    inputs = self.tokenizer(
-                        batch['text1'],
-                        text_pair=batch['text2'],
-                        padding=True,
-                        truncation=True,
-                        max_length=self.config.get('max_length', 256),
-                        return_tensors='pt'
-                    )
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    labels = batch['label'].to(self.device)
-                    inputs['labels'] = labels
-
-                    # 前向传播
                     outputs = self.model(**inputs)
-                    loss = outputs.loss
-
-                    # 收集预测和标签用于计算指标
-                    if self.loss_type != 'triplet':
-                        logits = outputs.logits
-                        predictions = torch.argmax(logits, dim=1)
-                        all_predictions.extend(predictions.cpu().numpy())
-                        all_labels.extend(labels.cpu().numpy())
-
-                # 根据梯度累积步数缩放损失
-                loss = loss / grad_accum_steps
+                    loss = outputs.loss / grad_accum_steps  # 根据梯度累积步数缩放损失
 
                 # 反向传播
-                if use_fp16:
-                    # 使用 scaler 进行反向传播
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                self.scaler.scale(loss).backward()
+            else:
+                # 不使用混合精度训练
+                outputs = self.model(**inputs)
+                loss = outputs.loss / grad_accum_steps  # 根据梯度累积步数缩放损失
+                loss.backward()
 
-                # 记录未缩放的loss
-                batch_loss = loss.item() * grad_accum_steps
-                total_loss += batch_loss
-                step_loss += batch_loss
+            # 收集预测和标签用于计算指标
+            logits = outputs.logits
+            predictions = torch.argmax(logits, dim=1)
+            all_predictions.extend(predictions.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
-                # 检查梯度是否有NaN值
-                has_nan_grad = False
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        has_nan_grad = True
-                        logger.warning(f"检测到NaN梯度，参数名: {name}")
+            # 记录未缩放的loss
+            batch_loss = loss.item() * grad_accum_steps
+            total_loss += batch_loss
+            step_loss += batch_loss
 
-                # 如果有NaN梯度，跳过本次更新
-                if has_nan_grad:
-                    self.optimizer.zero_grad()
-                    logger.warning("由于检测到NaN梯度，已跳过本次参数更新")
-                    continue
+            # 检查梯度是否有NaN值
+            has_nan_grad = False
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    has_nan_grad = True
+                    logger.warning(f"检测到NaN梯度，参数名: {name}")
 
-                # 更新进度条
-                progress_bar.set_postfix({
-                    'loss': f'{batch_loss:.4f}',
-                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}' if hasattr(self, 'scheduler') else 'N/A'
-                })
+            # 如果有NaN梯度，跳过本次更新
+            if has_nan_grad:
+                self.optimizer.zero_grad()
+                logger.warning("由于检测到NaN梯度，已跳过本次参数更新")
+                continue
+
+            # 更新进度条
+            progress_bar.set_postfix({
+                'loss': f'{batch_loss:.4f}',
+                'lr': f'{self.scheduler.get_last_lr()[0]:.2e}' if hasattr(self, 'scheduler') else 'N/A'
+            })
 
             # 在累积足够的梯度后更新参数
             if (batch_idx + 1) % grad_accum_steps == 0:
                 if use_fp16:
                     # 使用 scaler 进行梯度裁剪和参数更新
-                    # 确保scale已经被使用，否则不调用unscale_
                     try:
                         # 梯度裁剪前先解除缩放
                         self.scaler.unscale_(self.optimizer)
@@ -434,13 +317,14 @@ class DeBERTaTrainer:
 
                 # 每logging_steps步输出一次训练指标
                 if global_step % logging_steps == 0 and len(all_predictions) > 0:
-                    # 计算训练指标
+                    # 计算训练指标（三分类）
                     accuracy = accuracy_score(all_labels, all_predictions)
                     precision = precision_score(
-                        all_labels, all_predictions, zero_division=0)
+                        all_labels, all_predictions, average='weighted', zero_division=0)
                     recall = recall_score(
-                        all_labels, all_predictions, zero_division=0)
-                    f1 = f1_score(all_labels, all_predictions, zero_division=0)
+                        all_labels, all_predictions, average='weighted', zero_division=0)
+                    f1 = f1_score(all_labels, all_predictions,
+                                  average='weighted', zero_division=0)
 
                     # 计算平均损失
                     avg_step_loss = step_loss / logging_steps
@@ -466,169 +350,97 @@ class DeBERTaTrainer:
         Returns:
             float: 平均验证损失
         """
-        if self.loss_type == 'triplet':
-            self.model.eval()
-        else:
-            self.model.eval()
-
+        self.model.eval()
         total_loss = 0
         all_predictions = []
         all_labels = []
 
         # 是否使用混合精度训练
-        use_fp16 = self.config.get('fp16', True)
+        use_fp16 = self.config.get('fp16', False)
 
         with torch.no_grad():
-            if use_fp16:
-                with autocast(device_type='cuda'):
-                    for batch in tqdm(valid_loader, desc='验证中'):
-                        if self.loss_type == 'triplet':
-                            # 对于triplet loss，使用原本的方式
-                            text1_embeddings = self.encode_text(
-                                batch['text1'], train=False)
-                            text2_embeddings = self.encode_text(
-                                batch['text2'], train=False)
-                            labels = batch['label'].to(self.device)
+            for batch in tqdm(valid_loader, desc='验证中'):
+                # 准备输入数据
+                inputs = self.tokenizer(
+                    batch['text1'],
+                    text_pair=batch['text2'],
+                    padding=True,
+                    truncation=True,
+                    max_length=self.config.get('max_length', 256),
+                    return_tensors='pt'
+                )
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                labels = batch['label'].to(self.device)
+                inputs['labels'] = labels
 
-                            # 计算相似度
-                            text1_norm = F.normalize(
-                                text1_embeddings, p=2, dim=1)
-                            text2_norm = F.normalize(
-                                text2_embeddings, p=2, dim=1)
-                            similarities = torch.sum(
-                                text1_norm * text2_norm, dim=1)
-                            predictions = (similarities > 0.5).float()
-
-                            # 计算triplet loss
-                            distances = 1 - similarities
-                            pos_distances = distances[labels == 1].mean() if (
-                                labels == 1).any() else torch.tensor(0.0).to(self.device)
-                            neg_distances = distances[labels == 0].mean() if (
-                                labels == 0).any() else torch.tensor(1.0).to(self.device)
-                            margin = self.config.get('margin', 0.1)
-                            loss = torch.clamp(
-                                pos_distances - neg_distances + margin, min=0)
-                            total_loss += loss.item() * len(labels)
-                        else:
-                            # 对于cross_entropy，使用AutoModelForSequenceClassification
-                            # 准备输入数据
-                            inputs = self.tokenizer(
-                                batch['text1'],
-                                text_pair=batch['text2'],
-                                padding=True,
-                                truncation=True,
-                                max_length=self.config.get('max_length', 256),
-                                return_tensors='pt'
-                            )
-                            inputs = {k: v.to(self.device)
-                                      for k, v in inputs.items()}
-                            labels = batch['label'].to(self.device)
-                            inputs['labels'] = labels
-
-                            # 前向传播
-                            outputs = self.model(**inputs)
-                            loss = outputs.loss
-                            total_loss += loss.item() * len(labels)
-
-                            # 获取预测结果
-                            logits = outputs.logits
-                            predictions = torch.argmax(logits, dim=1)
-
-                        # 收集预测结果和标签
-                        all_predictions.extend(predictions.cpu().numpy())
-                        all_labels.extend(labels.cpu().numpy())
-            else:
-                for batch in tqdm(valid_loader, desc='验证中'):
-                    if self.loss_type == 'triplet':
-                        # 对于triplet loss，使用原本的方式
-                        text1_embeddings = self.encode_text(
-                            batch['text1'], train=False)
-                        text2_embeddings = self.encode_text(
-                            batch['text2'], train=False)
-                        labels = batch['label'].to(self.device)
-
-                        # 计算相似度
-                        text1_norm = F.normalize(text1_embeddings, p=2, dim=1)
-                        text2_norm = F.normalize(text2_embeddings, p=2, dim=1)
-                        similarities = torch.sum(
-                            text1_norm * text2_norm, dim=1)
-                        predictions = (similarities > 0.5).float()
-
-                        # 计算triplet loss
-                        distances = 1 - similarities
-                        pos_distances = distances[labels == 1].mean() if (
-                            labels == 1).any() else torch.tensor(0.0).to(self.device)
-                        neg_distances = distances[labels == 0].mean() if (
-                            labels == 0).any() else torch.tensor(1.0).to(self.device)
-                        margin = self.config.get('margin', 0.1)
-                        loss = torch.clamp(
-                            pos_distances - neg_distances + margin, min=0)
-                        total_loss += loss.item() * len(labels)
-                    else:
-                        # 对于cross_entropy，使用AutoModelForSequenceClassification
-                        # 准备输入数据
-                        inputs = self.tokenizer(
-                            batch['text1'],
-                            text_pair=batch['text2'],
-                            padding=True,
-                            truncation=True,
-                            max_length=self.config.get('max_length', 256),
-                            return_tensors='pt'
-                        )
-                        inputs = {k: v.to(self.device)
-                                  for k, v in inputs.items()}
-                        labels = batch['label'].to(self.device)
-                        inputs['labels'] = labels
-
-                        # 前向传播
+                # 前向传播
+                if use_fp16:
+                    with autocast(device_type='cuda'):
                         outputs = self.model(**inputs)
                         loss = outputs.loss
-                        total_loss += loss.item() * len(labels)
+                else:
+                    outputs = self.model(**inputs)
+                    loss = outputs.loss
 
-                        # 获取预测结果
-                        logits = outputs.logits
-                        predictions = torch.argmax(logits, dim=1)
+                total_loss += loss.item() * len(labels)
 
-                    # 收集预测结果和标签
-                    all_predictions.extend(predictions.cpu().numpy())
-                    all_labels.extend(labels.cpu().numpy())
+                # 获取预测结果
+                logits = outputs.logits
+                predictions = torch.argmax(logits, dim=1)
+
+                # 收集预测结果和标签
+                all_predictions.extend(predictions.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
 
         # 计算平均损失
         avg_loss = total_loss / len(valid_loader.dataset)
 
-        # 计算指标
+        # 计算三分类指标
         accuracy = accuracy_score(all_labels, all_predictions)
         precision = precision_score(
-            all_labels, all_predictions, zero_division=0)
-        recall = recall_score(all_labels, all_predictions, zero_division=0)
-        f1 = f1_score(all_labels, all_predictions, zero_division=0)
+            all_labels, all_predictions, average='weighted', zero_division=0)
+        recall = recall_score(
+            all_labels, all_predictions, average='weighted', zero_division=0)
+        f1 = f1_score(all_labels, all_predictions,
+                      average='weighted', zero_division=0)
 
-        # 计算正负样本数量
-        pos_count = sum(all_labels)
-        neg_count = len(all_labels) - pos_count
-        pos_ratio = pos_count / len(all_labels) if len(all_labels) > 0 else 0
+        # 各类别的指标
+        precision_per_class = precision_score(
+            all_labels, all_predictions, average=None, zero_division=0)
+        recall_per_class = recall_score(
+            all_labels, all_predictions, average=None, zero_division=0)
+        f1_per_class = f1_score(
+            all_labels, all_predictions, average=None, zero_division=0)
 
-        # 计算正负样本的准确率
-        pos_correct = sum([1 for i, label in enumerate(
-            all_labels) if label == 1 and all_predictions[i] == 1])
-        neg_correct = sum([1 for i, label in enumerate(
-            all_labels) if label == 0 and all_predictions[i] == 0])
-        pos_accuracy = pos_correct / pos_count if pos_count > 0 else 0
-        neg_accuracy = neg_correct / neg_count if neg_count > 0 else 0
+        # 统计各类别数量
+        class_names = ['HIGHER', 'LOWER', 'INCOMPARABLE']
 
         # 输出详细的验证集评估结果
-        logger.info("=" * 50)
-        logger.info(f"【验证集】评估结果 (Epoch {self.current_epoch+1}):")
+        logger.info("=" * 60)
+        logger.info(f"【验证集】三分类评估结果 (Epoch {self.current_epoch+1}):")
         logger.info(f"  样本总数: {len(all_labels)}")
-        logger.info(
-            f"  正样本数: {pos_count} ({pos_ratio:.2%}), 负样本数: {neg_count} ({1-pos_ratio:.2%})")
         logger.info(f"  Loss: {avg_loss:.4f}")
-        logger.info(
-            f"  Accuracy: {accuracy:.4f} (正样本: {pos_accuracy:.4f}, 负样本: {neg_accuracy:.4f})")
-        logger.info(f"  Precision: {precision:.4f}")
-        logger.info(f"  Recall: {recall:.4f}")
-        logger.info(f"  F1: {f1:.4f}")
-        logger.info("=" * 50)
+        logger.info(f"  整体准确率: {accuracy:.4f}")
+        logger.info(f"  加权精确率: {precision:.4f}")
+        logger.info(f"  加权召回率: {recall:.4f}")
+        logger.info(f"  加权F1: {f1:.4f}")
+        logger.info("")
+        logger.info("各类别详细指标:")
+
+        for i, class_name in enumerate(class_names):
+            if i < len(precision_per_class):
+                class_count = sum([1 for label in all_labels if label == i])
+                class_correct = sum([1 for j, label in enumerate(all_labels)
+                                     if label == i and all_predictions[j] == i])
+                class_accuracy = class_correct / class_count if class_count > 0 else 0
+
+                logger.info(f"  {class_name} ({i}): 数量={class_count}, "
+                            f"准确率={class_accuracy:.4f}, "
+                            f"精确率={precision_per_class[i]:.4f}, "
+                            f"召回率={recall_per_class[i]:.4f}, "
+                            f"F1={f1_per_class[i]:.4f}")
+
+        logger.info("=" * 60)
 
         return avg_loss
 
@@ -706,63 +518,40 @@ class DeBERTaTrainer:
             logger.info("未找到检查点，从头开始训练")
             return 0, float('inf')
 
-    def _cleanup_old_checkpoints(self, keep_num=3):
-        """
-        清理旧的检查点，只保留最近的几个
-
-        Args:
-            keep_num: 保留的检查点数量
-        """
-        save_dir = Path(self.config['save_dir'])
-        checkpoints = list(save_dir.glob('checkpoint_step_*.pt'))
-
-        # 按修改时间排序
-        checkpoints.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-
-        # 删除旧的检查点
-        for checkpoint in checkpoints[keep_num:]:
-            try:
-                os.remove(checkpoint)
-                logger.info(f"删除旧检查点: {checkpoint}")
-            except Exception as e:
-                logger.warning(f"删除检查点失败: {checkpoint}, 错误: {str(e)}")
-
     def train(self):
         """
         训练模型
         """
-        # 根据损失函数类型选择数据集类
-        if self.loss_type == 'triplet':
-            train_dataset = RoomMatchTripletDataset(
-                self.config['train_file'], is_train=True)
-            valid_dataset = RoomMatchValidationDataset(
-                self.config['valid_file'])
-        else:
-            train_dataset = RoomMatchValidationDataset(
-                self.config['train_file'])
-            valid_dataset = RoomMatchValidationDataset(
-                self.config['valid_file'])
+        # 加载房间比较数据集
+        train_dataset = RoomComparisonDataset(self.config['train_file'])
+        valid_dataset = RoomComparisonDataset(self.config['valid_file'])
 
         logger.info(f"加载了 {len(train_dataset)} 个训练样本")
         logger.info(f"加载了 {len(valid_dataset)} 个验证样本")
 
+        # 计算类别权重
+        if hasattr(train_dataset, 'get_class_weights'):
+            class_weights = train_dataset.get_class_weights()
+            # 更新配置中的类别权重
+            self.config['class_weights'] = class_weights
+
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.config.get('batch_size', 64),
+            batch_size=self.config.get('batch_size', 8),
             shuffle=True,
             num_workers=self.config.get('num_workers', 4),
             pin_memory=self.config.get('pin_memory', True)
         )
         valid_loader = DataLoader(
             valid_dataset,
-            batch_size=self.config.get('batch_size', 64) * 2,
-            shuffle=True,
+            batch_size=self.config.get('batch_size', 8) * 2,
+            shuffle=False,
             num_workers=self.config.get('num_workers', 4),
             pin_memory=self.config.get('pin_memory', True)
         )
 
         # 创建学习率调度器
-        total_steps = len(train_dataset) // self.config.get('batch_size', 64)
+        total_steps = len(train_dataset) // self.config.get('batch_size', 8)
         total_steps = total_steps // self.config.get(
             'gradient_accumulation_steps', 1)
         total_steps = total_steps * self.config.get('num_epochs', 5)
@@ -805,21 +594,18 @@ class DeBERTaTrainer:
         logger.info(f"总训练步数: {num_training_steps}")
         logger.info(f"预热步数: {num_warmup_steps}")
         logger.info(f"数据集大小: {len(train_dataset)}")
-        logger.info(f"批次大小: {self.config.get('batch_size', 64)}")
+        logger.info(f"批次大小: {self.config.get('batch_size', 8)}")
         logger.info(
             f"梯度累积步数: {self.config.get('gradient_accumulation_steps', 1)}")
         logger.info(
-            f"有效批次大小: {self.config.get('batch_size', 64) * self.config.get('gradient_accumulation_steps', 1)}")
-
-        # 计算每个epoch验证的频率
-        eval_steps = self.config.get('eval_steps', 1000)
-        global_step = 0
-        early_stopping_counter = 0
+            f"有效批次大小: {self.config.get('batch_size', 8) * self.config.get('gradient_accumulation_steps', 1)}")
 
         # 检查fp16设置，在不支持时禁用
-        if self.config.get('fp16', True) and not torch.cuda.is_available():
+        if self.config.get('fp16', False) and not torch.cuda.is_available():
             self.config['fp16'] = False
             logger.warning("GPU不可用，已自动禁用混合精度训练")
+
+        early_stopping_counter = 0
 
         for epoch in range(start_epoch, self.config.get('num_epochs', 5)):
             self.current_epoch = epoch

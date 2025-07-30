@@ -423,7 +423,7 @@ def main():
         extractor = HotelRoomExtractor(max_workers=1)
 
         # CSV文件路径
-        csv_file = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/1sampled_hotels.csv"
+        csv_file = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/room_ratio_top1000.csv"
 
         # 检查文件是否存在
         if not os.path.exists(csv_file):

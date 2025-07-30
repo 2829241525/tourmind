@@ -40,7 +40,7 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练DeBERTa模型')
     parser.add_argument(
-        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/hotel_match/config/config_mdeberta.json", help='配置文件路径')
+        '--config', type=str, default="/home/maxon/disk2/roomMatch/room_match/rank_room/config/config_mdeberta.json", help='配置文件路径')
     parser.add_argument(
         '--reduce_lr', action='store_false', dest='no_reduce_lr', help='不降低学习率')
     parser.add_argument(

@@ -44,7 +44,7 @@ BASE_CONFIG = {
     # 指定要处理的酒店ID列表，如果为None则按比例采样 [12395035, 25709125, 21109218]
     'hotel_ids': None,
     # 'hotel_ids': [12976637],
-    'target_hotel_count': 3000,  # 采样目标酒店数量（当hotel_ids为None时使用）
+    'target_hotel_count': 1000,  # 采样目标酒店数量（当hotel_ids为None时使用）
     'max_workers': 5,  # 最大并发线程数
     'batch_size': 20  # 每批处理的房型对数量
 }
@@ -473,7 +473,11 @@ class RoomRankingProcessor:
             包含采样或指定酒店数据的DataFrame
         """
         try:
+            # 获取文件名，判断使用哪种逻辑
+            file_name = os.path.basename(csv_file_path)
             logger.info(f"开始读取CSV文件: {csv_file_path}")
+            logger.info(f"文件名: {file_name}")
+
             df = pd.read_csv(csv_file_path)
             logger.info(f"CSV文件读取成功，总行数: {len(df)}")
 
@@ -497,61 +501,139 @@ class RoomRankingProcessor:
 
                 return sampled_df
 
-            # 如果没有指定酒店ID，按原有逻辑进行采样
-            # 获取每个国家的酒店数量
-            hotel_country = df.groupby('s_hotel_id')[
-                'country_code'].first().reset_index()
-            country_hotel_counts = hotel_country['country_code'].value_counts()
-            total_hotels = len(hotel_country)
-
-            logger.info(f"总酒店数: {total_hotels}")
-            logger.info("各国酒店分布:")
-            for country, count in country_hotel_counts.head(10).items():
-                percentage = (count / total_hotels) * 100
-                logger.info(f"  {country}: {count} ({percentage:.1f}%)")
-
-            # 按比例采样酒店
-            sampled_hotels = []
-            for country, count in country_hotel_counts.items():
-                proportion = count / total_hotels
-                sample_size = max(1, int(target_hotel_count * proportion))
-
-                country_hotels = hotel_country[hotel_country['country_code']
-                                               == country]['s_hotel_id'].tolist()
-                if len(country_hotels) >= sample_size:
-                    sampled = np.random.choice(
-                        country_hotels, sample_size, replace=False)
-                else:
-                    sampled = country_hotels
-
-                sampled_hotels.extend(sampled)
-
-            # 如果采样数量不够目标数量，补充采样
-            if len(sampled_hotels) < target_hotel_count:
-                remaining_hotels = hotel_country[~hotel_country['s_hotel_id'].isin(
-                    sampled_hotels)]['s_hotel_id'].tolist()
-                additional_needed = target_hotel_count - len(sampled_hotels)
-                if len(remaining_hotels) >= additional_needed:
-                    additional = np.random.choice(
-                        remaining_hotels, additional_needed, replace=False)
-                    sampled_hotels.extend(additional)
-                else:
-                    sampled_hotels.extend(remaining_hotels)
-
-            # 限制到目标数量
-            sampled_hotels = sampled_hotels[:target_hotel_count]
-
-            logger.info(f"最终采样酒店数: {len(sampled_hotels)}")
-
-            # 筛选出采样酒店的数据
-            sampled_df = df[df['s_hotel_id'].isin(sampled_hotels)].copy()
-            logger.info(f"采样后数据行数: {len(sampled_df)}")
-
-            return sampled_df
+            # 根据文件名前缀决定使用哪种逻辑
+            if file_name.startswith('s_room'):
+                logger.info("使用 s_room 逻辑处理数据")
+                return self._process_s_room_logic(df, target_hotel_count)
+            elif file_name.startswith('spl_room'):
+                logger.info("使用 spl_room 逻辑处理数据")
+                return self._process_spl_room_logic(df, target_hotel_count)
+            else:
+                logger.warning(
+                    f"文件名 {file_name} 不以 s_room 或 spl_room 开头，默认使用 s_room 逻辑")
+                return self._process_s_room_logic(df, target_hotel_count)
 
         except Exception as e:
             logger.error(f"加载和采样数据失败: {str(e)}")
             raise
+
+    def _process_s_room_logic(self, df: pd.DataFrame, target_hotel_count: int) -> pd.DataFrame:
+        """处理 s_room 开头文件的数据逻辑（原有逻辑）"""
+        logger.info("使用原有 s_room 逻辑进行数据处理")
+
+        # 获取每个国家的酒店数量
+        hotel_country = df.groupby('s_hotel_id')[
+            'country_code'].first().reset_index()
+        country_hotel_counts = hotel_country['country_code'].value_counts()
+        total_hotels = len(hotel_country)
+
+        logger.info(f"总酒店数: {total_hotels}")
+        logger.info("各国酒店分布:")
+        for country, count in country_hotel_counts.head(10).items():
+            percentage = (count / total_hotels) * 100
+            logger.info(f"  {country}: {count} ({percentage:.1f}%)")
+
+        # 按比例采样酒店
+        sampled_hotels = []
+        for country, count in country_hotel_counts.items():
+            proportion = count / total_hotels
+            sample_size = max(1, int(target_hotel_count * proportion))
+
+            country_hotels = hotel_country[hotel_country['country_code']
+                                           == country]['s_hotel_id'].tolist()
+            if len(country_hotels) >= sample_size:
+                sampled = np.random.choice(
+                    country_hotels, sample_size, replace=False)
+            else:
+                sampled = country_hotels
+
+            sampled_hotels.extend(sampled)
+
+        # 如果采样数量不够目标数量，补充采样
+        if len(sampled_hotels) < target_hotel_count:
+            remaining_hotels = hotel_country[~hotel_country['s_hotel_id'].isin(
+                sampled_hotels)]['s_hotel_id'].tolist()
+            additional_needed = target_hotel_count - len(sampled_hotels)
+            if len(remaining_hotels) >= additional_needed:
+                additional = np.random.choice(
+                    remaining_hotels, additional_needed, replace=False)
+                sampled_hotels.extend(additional)
+            else:
+                sampled_hotels.extend(remaining_hotels)
+
+        # 限制到目标数量
+        sampled_hotels = sampled_hotels[:target_hotel_count]
+
+        logger.info(f"最终采样酒店数: {len(sampled_hotels)}")
+
+        # 筛选出采样酒店的数据
+        sampled_df = df[df['s_hotel_id'].isin(sampled_hotels)].copy()
+        logger.info(f"采样后数据行数: {len(sampled_df)}")
+
+        return sampled_df
+
+    def _process_spl_room_logic(self, df: pd.DataFrame, target_hotel_count: int) -> pd.DataFrame:
+        """处理 spl_room 开头文件的数据逻辑（新逻辑）"""
+        logger.info("使用 spl_room 逻辑进行数据处理")
+
+        # 检查必要的列是否存在
+        required_columns = ['s_hotel_id', 'country_code',
+                            'roomtypename', 'spl_bedtype_desc']
+        missing_columns = [
+            col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"spl_room 逻辑需要以下列，但文件中缺少: {missing_columns}")
+
+        # 获取每个国家的酒店数量
+        hotel_country = df.groupby('s_hotel_id')[
+            'country_code'].first().reset_index()
+        country_hotel_counts = hotel_country['country_code'].value_counts()
+        total_hotels = len(hotel_country)
+
+        logger.info(f"总酒店数: {total_hotels}")
+        logger.info("各国酒店分布:")
+        for country, count in country_hotel_counts.head(10).items():
+            percentage = (count / total_hotels) * 100
+            logger.info(f"  {country}: {count} ({percentage:.1f}%)")
+
+        # 按比例采样酒店
+        sampled_hotels = []
+        for country, count in country_hotel_counts.items():
+            proportion = count / total_hotels
+            sample_size = max(1, int(target_hotel_count * proportion))
+
+            country_hotels = hotel_country[hotel_country['country_code']
+                                           == country]['s_hotel_id'].tolist()
+            if len(country_hotels) >= sample_size:
+                sampled = np.random.choice(
+                    country_hotels, sample_size, replace=False)
+            else:
+                sampled = country_hotels
+
+            sampled_hotels.extend(sampled)
+
+        # 如果采样数量不够目标数量，补充采样
+        if len(sampled_hotels) < target_hotel_count:
+            remaining_hotels = hotel_country[~hotel_country['s_hotel_id'].isin(
+                sampled_hotels)]['s_hotel_id'].tolist()
+            additional_needed = target_hotel_count - len(sampled_hotels)
+            if len(remaining_hotels) >= additional_needed:
+                additional = np.random.choice(
+                    remaining_hotels, additional_needed, replace=False)
+                sampled_hotels.extend(additional)
+            else:
+                sampled_hotels.extend(remaining_hotels)
+
+        # 限制到目标数量
+        sampled_hotels = sampled_hotels[:target_hotel_count]
+
+        logger.info(f"最终采样酒店数: {len(sampled_hotels)}")
+
+        # 筛选出采样酒店的数据
+        sampled_df = df[df['s_hotel_id'].isin(sampled_hotels)].copy()
+        logger.info(f"采样后数据行数: {len(sampled_df)}")
+
+        return sampled_df
 
     def deduplicate_room_descriptions(self, room_descriptions: List[str]) -> List[str]:
         """
@@ -608,24 +690,40 @@ class RoomRankingProcessor:
 
         return deduplicated
 
-    def prepare_hotel_room_data(self, df: pd.DataFrame) -> Dict[int, Dict]:
+    def prepare_hotel_room_data(self, df: pd.DataFrame, csv_file_path: str = None) -> Dict[int, Dict]:
         """准备酒店房型数据"""
         try:
             hotel_room_data = {}
             total_original_rooms = 0
             total_final_rooms = 0
 
+            # 根据文件名判断使用哪种逻辑
+            use_spl_logic = False
+            if csv_file_path:
+                file_name = os.path.basename(csv_file_path)
+                use_spl_logic = file_name.startswith('spl_room')
+                logger.info(
+                    f"房型数据准备使用 {'spl_room' if use_spl_logic else 's_room'} 逻辑")
+
             for hotel_id in df['s_hotel_id'].unique():
                 hotel_df = df[df['s_hotel_id'] == hotel_id]
                 country = hotel_df['country_code'].iloc[0]
 
-                # 组合房型描述
+                # 根据逻辑组合房型描述
                 room_descriptions = []
                 for _, row in hotel_df.iterrows():
-                    room_name = str(row['room_name']) if pd.notna(
-                        row['room_name']) else ""
-                    bed_type = str(row['bed_type_desc']) if pd.notna(
-                        row['bed_type_desc']) else ""
+                    if use_spl_logic:
+                        # spl_room 逻辑：使用 roomtypename 和 spl_bedtype_desc
+                        room_name = str(row['roomtypename']) if pd.notna(
+                            row['roomtypename']) else ""
+                        bed_type = str(row['spl_bedtype_desc']) if pd.notna(
+                            row['spl_bedtype_desc']) else ""
+                    else:
+                        # s_room 逻辑：使用 room_name 和 bed_type_desc
+                        room_name = str(row['room_name']) if pd.notna(
+                            row['room_name']) else ""
+                        bed_type = str(row['bed_type_desc']) if pd.notna(
+                            row['bed_type_desc']) else ""
 
                     # 用空格组合，去除多余空格
                     combined = f"{room_name} {bed_type}".strip()
@@ -650,6 +748,7 @@ class RoomRankingProcessor:
 
             # 整体统计
             logger.info(f"📊 数据准备完成:")
+            logger.info(f"  使用逻辑: {'spl_room' if use_spl_logic else 's_room'}")
             logger.info(f"  总去重后房型数: {total_final_rooms}")
             logger.info(
                 f"  去重比例: {(total_original_rooms - total_final_rooms)/total_original_rooms*100:.1f}%" if total_original_rooms > 0 else "0%")
@@ -1099,7 +1198,8 @@ class RoomRankingProcessor:
 
             # 2. 准备房型数据
             logger.info("第2步：准备房型数据")
-            hotel_room_data = self.prepare_hotel_room_data(sampled_df)
+            hotel_room_data = self.prepare_hotel_room_data(
+                sampled_df, csv_file_path)
 
             if not hotel_room_data:
                 logger.warning("没有找到有多个房型的酒店")
@@ -1137,7 +1237,7 @@ class RoomRankingProcessor:
 
 def main():
     """主函数"""
-    csv_file_path = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_group/data/s_room_with_country_2025-07-21_095100.csv"
+    csv_file_path = "/home/maxon/disk2/roomMatch/room_match/Langchain/room_group/data/spl_room.csv"
 
     # 创建处理器
     processor = RoomRankingProcessor()
