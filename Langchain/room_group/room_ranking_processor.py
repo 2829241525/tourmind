@@ -190,6 +190,7 @@ class RoomRankingProcessor:
         os.environ['OPENAI_API_KEY'] = self.llm_config['api_key']
 
         self.llm = ChatOpenAI(
+            # temperature=0.01,
             model=self.llm_config['model_name'],
             temperature=self.llm_config['temperature'],
             max_tokens=self.llm_config['max_tokens'],
@@ -222,13 +223,16 @@ class RoomRankingProcessor:
 4.  **核心设施 (Key Facilities)**: 拥有 Balcony, Kitchen, Jacuzzi 等设施的房型更优。**无障碍设施(Accessible)有特殊规则，见下文**。
 5.  **床数量 (Bed Count)**: 床的数量越多越优 (e.g., 2 beds > 1 bed).
 6.  **床尺寸 (Bed Size)**:
+    *   **在两者床数量相同的情况下考虑**: 如果一方床包含另一方床，则不考虑床尺寸大小。
     *   **基础层级**: King > Queen > Double > Single/Twin.
     *   **特殊规则：不确定的床型（"或"逻辑）**: 描述中包含“/”或“或”表示床型不确定，代表一个可能性范围。其等级基于与确定床型的对比：
         *   **低于 "确定的最优选项"**: `1 Queen Bed/1 King Bed` **低于** `1 King Bed`。因为前者不保证能获得King Bed。
         *   **高于 "确定的最差选项"**: `1 Queen Bed/1 King Bed` **高于** `1 Queen Bed`。因为前者有获得更优King Bed的可能性。
+        *   **包含规则**: `1 Queen Bed and 1 King Bed` **高于** `1 King Bed`。因为前者包含后者。
+        *   **包含规则**: `1 Queen Bed and 1 King Bed` **低于** `2 King Bed`。因为前者有一张床低于后者。
 
 7.  **房间主题/特色 (room theme)**: 
-    *   **描述分析**: 分析整体描述，哪些描述词汇是房间的主题/特色，主题/特色不一定以theme/feature表述。
+    *   **描述分析**: 分析整体描述，哪些描述词汇是房间的主题/特色，主题/特色不一定以theme/feature表述，如果判断为房型等级或房间类型等描述，将不判断为主题或特色。
     *   **有无对比**: 有主题/特色描述 > 无主题/特色描述。
     *   ** 不同主题/特色不可比**: 不同类型的主题/特色（如 动漫/电影/明星/特殊景观/动物等等）视为主题/特色不同，没有高低之分。当两个房型主题不同时，强制不可比
 7.  **附加福利 (Benefits)**: 包含免费早餐、机场接送、行政酒廊待遇等福利的房型更优。
@@ -254,7 +258,7 @@ class RoomRankingProcessor:
     *   **特色不同**: 拥有不同类型的景观 (`海景` vs `城景`)、不同的核心设施 (`阳台` vs `厨房`)、或不同的福利 (`早餐` vs `机场接送`)。
     *   **优劣互换 (关键维度冲突)**: A在某些维度优于B，同时B在另一些维度优于A (`A: Deluxe Room` vs `B: Standard Suite`; `A: 1 King Bed` vs `B: 2 Double Beds`)。
     *   **特别关注**: A在某些维度优于B，但B在以上任何一个维度优于A（包括床数，设施，景观等等）。则判定为 **INCOMPARABLE**。
-    *   **主题/特征**: A与B都有各自的主题,且主题不一致时。则判定为 **INCOMPARABLE**。
+    *   **主题/特征**: 要确定每一个描述词时房型等级/类型/设施/景观等。在确定描述词属于主题，且A与B都有各自的主题,且主题不一致时。则判定为 **INCOMPARABLE**。
 
 ### EQUAL (完全相同)
 *   **规则**: 只有当两个房型在**所有**比较维度上都完全相同时，才判定为 **EQUAL**。

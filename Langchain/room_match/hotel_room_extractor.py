@@ -70,9 +70,9 @@ class HotelRoomExtractor:
 
     # 默认API配置
     DEFAULT_API_CONFIG = {
-        "base_url": "http://erp.tourmind.cn/roomtypemapping/api/get_roomtype",
+        "base_url": "https://erp.tourmind.cn/roomtypemapping/api/get_roomtype",
         "default_params": {
-            "supplierID": "0",
+            "supplierID": "8",
             "sRoomBaseType": "tourmind",
             "sroom_status": "0"
         },
@@ -142,7 +142,7 @@ class HotelRoomExtractor:
 
         # 更新Referer中的酒店ID
         headers = self.DEFAULT_API_CONFIG["default_headers"].copy()
-        headers['Referer'] = f'http://erp.tourmind.cn/roomtypemapping/{hotel_id}?supplierId=0&brt=tourmind&loadMaster=true'
+        headers['Referer'] = f'https://erp.tourmind.cn/roomtypemapping/{hotel_id}?supplierId=8&brt=tourmind&loadMaster=true'
 
         return full_url, headers
 
@@ -228,8 +228,8 @@ class HotelRoomExtractor:
                         })
 
             # 如果没有待匹配供应商房型，返回空列表
-            if not has_unmatched_supplier_rooms:
-                return []
+            # if not has_unmatched_supplier_rooms:
+            #     return []
 
             csv_rows = unmatched_supplier_rooms
 
@@ -255,7 +255,8 @@ class HotelRoomExtractor:
 
     def process_single_hotel_thread_safe(self, hotel_row: Dict) -> Dict[str, Any]:
         """线程安全的单个酒店处理函数"""
-        hotel_id = str(hotel_row['hotel_id'])
+        hotel_id = str(int(hotel_row['hotel_id']))
+
         hotel_name = hotel_row.get('hotel_name', '')
 
         try:
@@ -337,8 +338,10 @@ class HotelRoomExtractor:
             if 'hotel_id' not in hotels_df.columns:
                 raise ValueError("CSV文件必须包含'hotel_id'列")
 
+            # 先进行去重
+            hotels_df = hotels_df.drop_duplicates(subset=['hotel_id'])
             total_hotels = len(hotels_df)
-            logger.info(f"共读取到{total_hotels}个酒店")
+            logger.info(f"去重后共读取到{total_hotels}个酒店")
 
             # 应用索引范围
             if end_index is None:
@@ -435,7 +438,7 @@ def main():
             csv_file_path=csv_file,
             output_dir="/home/maxon/disk2/roomMatch/room_match/Langchain/room_match/output",
             start_index=0,
-            end_index=2000,  # 处理前20个酒店
+            end_index=10000,  # 处理前20个酒店
             delay_seconds=1.0  # 每个请求间隔1秒，增加等待时间
         )
 
