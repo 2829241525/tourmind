@@ -42,13 +42,30 @@ def init_worker():
 def create_text_format_vectorized(df, is_supply=True):
     """向量化创建文本格式"""
     if is_supply:
+        # 处理城市名，如果为空则不添加
+        city_name_part = df['CityName'].fillna('')
+        city_name_mask = city_name_part != ''
+        city_name_text = np.where(city_name_mask,
+                                  ",CityName:" + city_name_part.astype(str),
+                                  "")
+
         return (
             "HotelName:" + df['HotelName'].fillna('').astype(str) +
+            city_name_text +
             ",Address:" + df['Address'].fillna('').astype(str)
         )
     else:
+        # 处理目标城市名，如果为空则不添加
+        target_city_name_part = df['MappingWorksCityName'].fillna('')
+        target_city_name_mask = target_city_name_part != ''
+        target_city_name_text = np.where(target_city_name_mask,
+                                         ",TargetCityName:" +
+                                         target_city_name_part.astype(str),
+                                         "")
+
         return (
             "TargetHotel:" + df['MappingWorksHotelName'].fillna('').astype(str) +
+            target_city_name_text +
             ",TargetAddress:" +
             df['MappingWorksAddress'].fillna('').astype(str)
         )
@@ -59,8 +76,8 @@ def calculate_distance(lat1, lng1, lat2, lng2):
     return np.sqrt((lat1 - lat2)**2 + (lng1 - lng2)**2)
 
 
-def find_nearest_hotels(origin_lat, origin_lng, target_lats, target_lngs, num_samples):
-    """找到最近的酒店"""
+def find_nearest_hotels(origin_lat, origin_lng, target_lats, target_lngs, num_samples, origin_city=None, target_cities=None):
+    """找到最近的酒店，优先选择城市名一致的数据"""
     # 快速过滤：经纬度差值超过阈值的直接排除
     lat_diff = np.abs(origin_lat - target_lats)
     lng_diff = np.abs(origin_lng - target_lngs)
@@ -73,6 +90,7 @@ def find_nearest_hotels(origin_lat, origin_lng, target_lats, target_lngs, num_sa
         # 如果没有通过粗筛的点，则只能使用所有点计算距离
         distances = calculate_distance(
             origin_lat, origin_lng, target_lats, target_lngs)
+        city_match_mask = None
     else:
         # 对通过粗筛的点计算精确距离
         filtered_lats = target_lats[mask]
@@ -84,8 +102,42 @@ def find_nearest_hotels(origin_lat, origin_lng, target_lats, target_lngs, num_sa
             origin_lat, origin_lng, filtered_lats, filtered_lngs)
         distances[mask] = filtered_distances
 
+        # 如果提供了城市名信息，创建城市名匹配掩码
+        if origin_city is not None and target_cities is not None:
+            city_match_mask = np.full_like(target_lats, False, dtype=bool)
+            filtered_cities = target_cities[mask]
+            # 城市名匹配（忽略大小写和空格），处理NaN值
+            city_match = np.array([
+                (not pd.isna(origin_city) and not pd.isna(city) and
+                 str(origin_city).lower().strip() == str(city).lower().strip())
+                for city in filtered_cities
+            ])
+            city_match_mask[mask] = city_match
+        else:
+            city_match_mask = None
+
     # 获取距离最小的索引（不包括自身，自身距离为0）
-    nearest_indices = np.argsort(distances)[:num_samples]
+    if city_match_mask is not None and np.any(city_match_mask):
+        # 优先选择城市名一致的
+        city_match_indices = np.where(city_match_mask)[0]
+        city_match_distances = distances[city_match_indices]
+        city_match_sorted = np.argsort(city_match_distances)
+        city_match_nearest = city_match_indices[city_match_sorted][:num_samples]
+
+        # 如果城市名一致的数量不够，再补充其他城市的
+        if len(city_match_nearest) < num_samples:
+            remaining_needed = num_samples - len(city_match_nearest)
+            other_indices = np.where(~city_match_mask)[0]
+            other_distances = distances[other_indices]
+            other_sorted = np.argsort(other_distances)
+            other_nearest = other_indices[other_sorted][:remaining_needed]
+            nearest_indices = np.concatenate(
+                [city_match_nearest, other_nearest])
+        else:
+            nearest_indices = city_match_nearest
+    else:
+        # 没有城市名信息或没有城市名匹配，按距离排序
+        nearest_indices = np.argsort(distances)[:num_samples]
 
     return nearest_indices
 
@@ -103,6 +155,10 @@ def generate_negative_samples_batch(args):
         # 获取经纬度数据
         target_lats = group_df['TargetLat'].values
         target_lngs = group_df['TargetLng'].values
+
+        # 获取城市名数据
+        supply_cities = group_df['CityName'].values if 'CityName' in group_df.columns else None
+        target_cities = group_df['MappingWorksCityName'].values if 'MappingWorksCityName' in group_df.columns else None
 
         if len(target_texts) <= 1:
             return None
@@ -129,6 +185,10 @@ def generate_negative_samples_batch(args):
             available_lats = target_lats[mask]
             available_lngs = target_lngs[mask]
 
+            # 获取当前供应商的城市名
+            origin_city = supply_cities[supply_idx] if supply_cities is not None else None
+            available_cities = target_cities[mask] if target_cities is not None else None
+
             # 计算当前供应商文本需要的负样本数
             current_samples = min(
                 num_neg_samples // len(supply_texts) + (1 if supply_idx <
@@ -141,7 +201,8 @@ def generate_negative_samples_batch(args):
                 nearest_indices = find_nearest_hotels(
                     original_target_lat, original_target_lng,
                     available_lats, available_lngs,
-                    current_samples
+                    current_samples,
+                    origin_city, available_cities
                 )
 
                 selected_targets = available_targets[nearest_indices]
@@ -190,8 +251,15 @@ def process_data_chunk(df_chunk):
         # 添加标签列（正样本）
         df_chunk['label'] = 1
 
-        # 保留需要的列
-        return df_chunk[['SupplyText', 'TargetText', 'CountryCode', 'label', 'TargetLat', 'TargetLng']]
+        # 保留需要的列，包括城市名字段
+        columns_to_keep = ['SupplyText', 'TargetText',
+                           'CountryCode', 'label', 'TargetLat', 'TargetLng']
+        if 'CityName' in df_chunk.columns:
+            columns_to_keep.append('CityName')
+        if 'MappingWorksCityName' in df_chunk.columns:
+            columns_to_keep.append('MappingWorksCityName')
+
+        return df_chunk[columns_to_keep]
     except Exception as e:
         logging.error(f'处理数据块时出错: {str(e)}')
         return None
@@ -262,9 +330,15 @@ def process_data(df):
         final_df = pd.concat([df_processed, negative_df], ignore_index=True)
         final_df = final_df.sample(frac=1).reset_index(drop=True)
 
-        # 保留所有需要的列，包括经纬度
-        final_df = final_df[['SupplyText', 'TargetText',
-                             'CountryCode', 'TargetLat', 'TargetLng', 'label']]
+        # 保留所有需要的列，包括经纬度和城市名
+        final_columns = ['SupplyText', 'TargetText',
+                         'CountryCode', 'TargetLat', 'TargetLng', 'label']
+        if 'CityName' in final_df.columns:
+            final_columns.append('CityName')
+        if 'MappingWorksCityName' in final_df.columns:
+            final_columns.append('MappingWorksCityName')
+
+        final_df = final_df[final_columns]
 
         return final_df
 
@@ -321,6 +395,8 @@ def main():
                     'CountryCode': str,
                     'MappingWorksLat': str,  # 改为str先读入
                     'MappingWorksLng': str,  # 改为str先读入
+                    'CityName': str,
+                    'MappingWorksCityName': str,
                 },
                 chunksize=config['batch_size'],
                 low_memory=False
@@ -410,9 +486,14 @@ def main():
             num_chunks = (len(final_df) + chunk_size - 1) // chunk_size
 
             with open(config['output_file'], 'w', encoding='utf-8') as f:
-                # 写入表头（包含经纬度字段）
-                f.write(
-                    'SupplyText,TargetText,CountryCode,TargetLat,TargetLng,label\n')
+                # 写入表头（包含经纬度和城市名字段）
+                header_columns = ['SupplyText', 'TargetText',
+                                  'CountryCode', 'TargetLat', 'TargetLng', 'label']
+                if 'CityName' in final_df.columns:
+                    header_columns.append('CityName')
+                if 'MappingWorksCityName' in final_df.columns:
+                    header_columns.append('MappingWorksCityName')
+                f.write(','.join(header_columns) + '\n')
 
             for i in tqdm(range(num_chunks), desc="保存数据"):
                 start_idx = i * chunk_size
