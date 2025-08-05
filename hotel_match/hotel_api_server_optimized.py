@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import queue
 
 import torch
+from torch.cuda.amp import autocast
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -36,10 +37,11 @@ MAX_LENGTH = 80
 DEFAULT_THRESHOLD = 0.9
 DEFAULT_MODEL = 'mdeberta'
 TOKENIZER_MODEL_NAME = "microsoft/mdeberta-v3-base"
+USE_FP16 = False
 
 # 模型路径
 MODEL_PATHS = {
-    'mdeberta': os.path.join(BASE_DIR, 'checkpoints_hotel_v4_12e/best_model')
+    'mdeberta': os.path.join(BASE_DIR, 'checkpoints_hotel_v5/best_model')
 }
 
 # 并发配置
@@ -203,19 +205,22 @@ class HotelPredictor:
     """酒店匹配预测器"""
 
     def __init__(self, model_path: str):
+        """初始化预测器（参考inference.py的结构）"""
         self.device = torch.device(DEVICE)
         self.model_path = model_path
+        logger.info(f"使用设备: {self.device}")
 
         # 配置混合精度
-        self.use_fp16 = torch.cuda.is_available()
+        self.use_fp16 = USE_FP16 and torch.cuda.is_available()
         if torch.cuda.is_available():
             gpu_cap = torch.cuda.get_device_capability(0)
             if gpu_cap[0] < 7:
                 self.use_fp16 = False
 
-        # 加载模型和分词器
+        # 加载配置和模型
+        self._load_config(model_path)
+        self._load_tokenizer(model_path)
         self._load_model()
-        self._load_tokenizer()
 
         # 初始化批处理器
         self.batch_processor = BatchProcessor(
@@ -228,39 +233,57 @@ class HotelPredictor:
         self.total_processing_time = 0
         self.total_requests = 0
 
+    def _load_config(self, model_path):
+        """加载配置文件（参考inference.py的结构）"""
+        config_path = os.path.join(BASE_DIR, 'config', 'config_mdeberta.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+            self.temperature = self.config.get('temperature', 0.05)
+        else:
+            logger.warning("未找到配置文件，使用默认配置")
+            self.temperature = 0.05
+
     def _load_model(self):
+        """加载模型（参考inference.py的结构）"""
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"模型路径不存在: {self.model_path}")
+
+        logger.info("加载mDeBERTa Classifier模型")
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_path).to(self.device)
+
+        # 处理精度设置（参考inference.py）
+        if self.use_fp16:
+            self.model = self.model.half()
+            logger.info("已将模型转换为半精度(FP16)计算")
+        else:
+            self.model = self.model.float()
+            logger.info("已将模型转换为全精度(float32)计算")
+
+        self.loss_type = 'cross_entropy'
+
+        # 启用梯度检查点以节省显存
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable()
+
+        self.model.eval()
+
+    def _load_tokenizer(self, model_path):
+        """加载分词器（参考inference.py的结构）"""
         try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            if self.use_fp16:
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    self.model_path, torch_dtype=torch.float16
-                ).to(self.device)
-            else:
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    self.model_path
-                ).to(self.device)
-
-            self.model.eval()
-            for param in self.model.parameters():
-                param.requires_grad = False
-
-            if hasattr(self.model, 'gradient_checkpointing_enable'):
-                self.model.gradient_checkpointing_enable()
-
-        except Exception as e:
-            logger.error(f"模型加载失败: {str(e)}")
-            raise
-
-    def _load_tokenizer(self):
-        try:
+            logger.info("尝试从本地路径加载分词器...")
             self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_path, use_fast=False)
-        except Exception:
+                model_path, use_fast=False)
+            logger.info("成功从本地路径加载分词器")
+        except Exception as e:
+            logger.warning(f"从本地路径加载分词器失败: {str(e)}")
+            logger.info(f"尝试从预训练模型加载分词器: {TOKENIZER_MODEL_NAME}")
             self.tokenizer = AutoTokenizer.from_pretrained(
                 TOKENIZER_MODEL_NAME, use_fast=False)
+            logger.info(f"成功从预训练模型加载分词器: {TOKENIZER_MODEL_NAME}")
 
+        # 清理GPU内存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -300,62 +323,55 @@ class HotelPredictor:
         if not hasattr(self, 'model') or self.model is None:
             raise RuntimeError("Model not available")
 
-        total_len = len(text1_list)
-        all_logits_list = []
+        logits_list = []
 
-        for i in range(0, total_len, batch_size):
+        for i in range(0, len(text1_list), batch_size):
             batch_text1 = text1_list[i:i + batch_size]
             batch_text2 = text2_list[i:i + batch_size]
 
-            with torch.cuda.device(self.device if torch.cuda.is_available() else 'cpu'):
-                encoded = self.tokenizer(
-                    batch_text1,
-                    text_pair=batch_text2,
-                    padding=True,
-                    truncation=True,
-                    max_length=MAX_LENGTH,
-                    return_tensors='pt'
-                )
+            # 编码（参考inference.py的参数设置）
+            encoded = self.tokenizer(
+                batch_text1,
+                text_pair=batch_text2,
+                padding=True,
+                truncation='only_first',
+                max_length=MAX_LENGTH,
+                return_tensors='pt',
+                return_attention_mask=True,
+                return_token_type_ids=True,
+                verbose=False
+            )
+            encoded = {k: v.to(self.device) for k, v in encoded.items()}
 
-                encoded = {k: v.to(self.device) for k, v in encoded.items()}
+            with torch.no_grad():
+                # 推理
+                outputs = self.model(**encoded)
 
-                with torch.no_grad():
-                    with autocast(enabled=self.use_fp16):
-                        outputs = self.model(**encoded)
-                        batch_logits = outputs.logits[:, 1]
+                # 处理异常值（参考inference.py的处理方式）
+                if torch.isnan(outputs.logits).any():
+                    outputs.logits = torch.nan_to_num(
+                        outputs.logits, nan=-10.0)
+                    logger.warning("检测到NaN值，已替换为安全值")
 
-                        # 处理异常值
-                        if torch.isnan(batch_logits).any() or torch.isinf(batch_logits).any():
-                            batch_logits = torch.nan_to_num(
-                                batch_logits, nan=0.0, posinf=10.0, neginf=-10.0)
+                # 获取正类的logits得分
+                batch_logits = outputs.logits[:, 1]
 
-                        batch_logits_cpu = batch_logits.float().cpu()
-                        all_logits_list.append(batch_logits_cpu)
+                # 确保返回的是float32类型
+                if batch_logits.dtype != torch.float32:
+                    batch_logits = batch_logits.float()
 
-                        del outputs, batch_logits
+                logits_list.append(batch_logits.cpu())
 
-                for v in encoded.values():
-                    del v
-                del encoded
-
-                if i > 0 and (i // batch_size) % 5 == 0:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-        all_logits = torch.cat(all_logits_list, dim=0)
-        del all_logits_list
-        return all_logits
+        return torch.cat(logits_list, dim=0)
 
     def calculate_similarity(self, source_embeddings, normalize_to_probability=True):
         """计算相似度"""
-        similarities = source_embeddings
-
+        # 确保为float32类型并应用sigmoid（参考inference.py）
         if normalize_to_probability:
-            if similarities.dtype == torch.float16:
-                similarities = similarities.float()
-            similarities = torch.sigmoid(similarities)
-
-        return similarities
+            if source_embeddings.dtype != torch.float32:
+                source_embeddings = source_embeddings.float()
+            return torch.sigmoid(source_embeddings)
+        return source_embeddings
 
     def _batch_process_text_pairs(self, items):
         """批量处理文本对"""
@@ -422,8 +438,8 @@ class HotelPredictor:
             logits = self.encode_text_pair(source_texts, target_texts)
             similarities = self.calculate_similarity(logits)
 
-            # 处理异常值
-            if torch.isnan(similarities).any() or torch.isinf(similarities).any():
+            # 处理异常值（参考inference.py的处理方式）
+            if torch.isnan(similarities).any():
                 similarities = torch.nan_to_num(
                     similarities, nan=0.0, posinf=1.0, neginf=0.0)
 
@@ -445,10 +461,6 @@ class HotelPredictor:
             'predictions': predictions.cpu().numpy().tolist(),
             'threshold': threshold
         }
-
-        del logits, similarities, predictions
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         return result
 
@@ -644,8 +656,10 @@ app = FastAPI(
 class MatchRequest(BaseModel):
     hotel: List[str]
     address: List[str]
+    city: List[str] = None  # 添加城市参数
     s_hotel: List[str]
     s_address: List[str]
+    s_city: List[str] = None  # 添加目标城市参数
     threshold: float = DEFAULT_THRESHOLD
     model: str = DEFAULT_MODEL
     token: str = None
@@ -734,22 +748,49 @@ async def match_hotels(request: MatchRequest, background_tasks: BackgroundTasks)
                     background_tasks.add_task(init_model, model_type)
 
         # 输入验证
-        list_lengths = [
+        required_lengths = [
             len(request.hotel), len(request.address),
             len(request.s_hotel), len(request.s_address)
         ]
-        if len(set(list_lengths)) != 1:
-            raise HTTPException(status_code=400, detail="所有输入列表的长度必须相同")
 
-        # 组装文本
-        source_texts = [
-            f"HotelName:{hotel},Address:{address}"
-            for hotel, address in zip(request.hotel, request.address)
-        ]
-        target_texts = [
-            f"TargetHotel:{s_hotel},TargetAddress:{s_address}"
-            for s_hotel, s_address in zip(request.s_hotel, request.s_address)
-        ]
+        # 检查必需字段长度一致
+        if len(set(required_lengths)) != 1:
+            raise HTTPException(status_code=400, detail="所有必需输入列表的长度必须相同")
+
+        # 检查可选字段长度（如果提供）
+        if request.city and len(request.city) != len(request.hotel):
+            raise HTTPException(status_code=400, detail="city列表长度必须与其他列表相同")
+        if request.s_city and len(request.s_city) != len(request.s_hotel):
+            raise HTTPException(status_code=400, detail="s_city列表长度必须与其他列表相同")
+
+        # 组装文本（参考generate_samples.py的格式）
+        source_texts = []
+        target_texts = []
+
+        for i in range(len(request.hotel)):
+            # 构建源文本
+            hotel = request.hotel[i]
+            address = request.address[i]
+            city = request.city[i] if request.city and i < len(
+                request.city) else None
+
+            source_text = f"HotelName:{hotel}"
+            if city and city.strip():
+                source_text += f",CityName:{city}"
+            source_text += f",Address:{address}"
+            source_texts.append(source_text)
+
+            # 构建目标文本
+            s_hotel = request.s_hotel[i]
+            s_address = request.s_address[i]
+            s_city = request.s_city[i] if request.s_city and i < len(
+                request.s_city) else None
+
+            target_text = f"TargetHotel:{s_hotel}"
+            if s_city and s_city.strip():
+                target_text += f",TargetCityName:{s_city}"
+            target_text += f",TargetAddress:{s_address}"
+            target_texts.append(target_text)
 
         # 执行预测
         result = await predictor.predict_async(source_texts, target_texts, request.threshold)
