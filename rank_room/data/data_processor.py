@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 数据处理脚本
-支持数据集平衡和划分
+支持数据集划分
 """
 
 import pandas as pd
@@ -57,74 +57,6 @@ class DataProcessor:
             raise
         except Exception as e:
             logger.error(f"加载文件失败: {str(e)}")
-            raise
-
-    def balance_by_label(self, label_column: str, pos_neg_ratio: Tuple[int, int], random_state: Optional[int] = None):
-        """按标签比例整理数据，使正负样本达到指定比例
-
-        Args:
-            label_column: 标签列的名称
-            pos_neg_ratio: 正负样本比例，格式为(正样本,负样本)，例如(1,4)表示正负比为1:4
-            random_state: 随机种子
-            
-        Returns:
-            平衡后的DataFrame
-        """
-        if self.df is None:
-            self.load_data()
-
-        try:
-            # 检查标签列是否存在
-            if label_column not in self.df.columns:
-                raise ValueError(f"标签列 '{label_column}' 在数据集中不存在")
-
-            # 将数据集按标签分为正负样本
-            positive_samples = self.df[self.df[label_column] == 1]
-            negative_samples = self.df[self.df[label_column] == 0]
-
-            logger.info(f"原始数据集中正样本数量: {len(positive_samples)}, 负样本数量: {len(negative_samples)}")
-
-            pos_ratio, neg_ratio = pos_neg_ratio
-            
-            # 确定最终的正负样本数量
-            if len(positive_samples) / pos_ratio > len(negative_samples) / neg_ratio:
-                # 负样本数量不足，以负样本为基准
-                n_neg = len(negative_samples)
-                n_pos = int(n_neg * pos_ratio / neg_ratio)
-                logger.info(f"以负样本数量为基准，需要从 {len(positive_samples)} 个正样本中选择 {n_pos} 个")
-                # 随机抽取正样本
-                positive_samples = positive_samples.sample(n=n_pos, random_state=random_state)
-            else:
-                # 正样本数量不足，以正样本为基准
-                n_pos = len(positive_samples)
-                n_neg = int(n_pos * neg_ratio / pos_ratio)
-                logger.info(f"以正样本数量为基准，需要从 {len(negative_samples)} 个负样本中选择 {n_neg} 个")
-                # 随机抽取负样本
-                negative_samples = negative_samples.sample(n=n_neg, random_state=random_state)
-
-            # 合并正负样本
-            balanced_df = pd.concat([positive_samples, negative_samples])
-            
-            # 打乱数据
-            balanced_df = balanced_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
-            
-            # 输出最终数据分布情况
-            total = len(balanced_df)
-            n_pos_final = len(balanced_df[balanced_df[label_column] == 1])
-            n_neg_final = len(balanced_df[balanced_df[label_column] == 0])
-            
-            logger.info(f"平衡后数据集分布情况:")
-            logger.info(f"总数据量: {total}")
-            logger.info(f"正样本: {n_pos_final} ({n_pos_final / total * 100:.2f}%)")
-            logger.info(f"负样本: {n_neg_final} ({n_neg_final / total * 100:.2f}%)")
-            logger.info(f"正负样本比例: 1:{n_neg_final / n_pos_final:.2f}")
-            
-            # 更新实例的dataframe为平衡后的数据
-            self.df = balanced_df
-            return balanced_df
-            
-        except Exception as e:
-            logger.error(f"平衡数据集失败: {str(e)}")
             raise
 
     def split_datasets(self,
@@ -190,37 +122,17 @@ class DataProcessor:
             total = len(self.df)
             logger.info(f"数据集分布情况:")
             logger.info(f"总数据量: {total}")
-            logger.info(f"训练集: {len(train_df)} ({len(train_df) / total * 100:.2f}%)")
-            logger.info(f"验证集: {len(valid_df)} ({len(valid_df) / total * 100:.2f}%)")
-            logger.info(f"测试集: {len(test_df)} ({len(test_df) / total * 100:.2f}%)")
+            logger.info(
+                f"训练集: {len(train_df)} ({len(train_df) / total * 100:.2f}%)")
+            logger.info(
+                f"验证集: {len(valid_df)} ({len(valid_df) / total * 100:.2f}%)")
+            logger.info(
+                f"测试集: {len(test_df)} ({len(test_df) / total * 100:.2f}%)")
 
             return train_df, valid_df, test_df
 
         except Exception as e:
             logger.error(f"划分数据集失败: {str(e)}")
-            raise
-            
-    def balance_and_split(self,
-                          label_column: str,
-                          pos_neg_ratio: Tuple[int, int],
-                          valid_size: float,
-                          test_size: float,
-                          train_file: str,
-                          valid_file: str,
-                          test_file: str,
-                          random_state: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """先平衡数据集的正负样本比例，再划分训练集、验证集和测试集"""
-        try:
-            # 首先平衡样本
-            logger.info("第一步：正在平衡数据集的正负样本比例...")
-            self.balance_by_label(label_column, pos_neg_ratio, random_state)
-            
-            # 然后划分数据集
-            logger.info("第二步：正在划分训练集、验证集和测试集...")
-            return self.split_datasets(valid_size, test_size, train_file, valid_file, test_file, random_state)
-            
-        except Exception as e:
-            logger.error(f"平衡并划分数据集失败: {str(e)}")
             raise
 
 
@@ -228,28 +140,20 @@ def main():
     parser = argparse.ArgumentParser(description='数据处理工具')
 
     # 基本参数
-    parser.add_argument('--input', type=str, default='hotel_samples.csv',
-                        help='输入CSV文件路径 (默认: hotel_samples.csv)')
-
-    # 标签平衡参数
-    parser.add_argument('--label-column', type=str, default='label',
-                        help='标签列名 (默认: label)')
-    parser.add_argument('--pos-ratio', type=int, default=1,
-                        help='正样本比例 (默认: 1)')
-    parser.add_argument('--neg-ratio', type=int, default=4,
-                        help='负样本比例 (默认: 4)')
+    parser.add_argument('--input', type=str, default='/home/maxon/disk2/roomMatch/room_match/rank_room/data/ranking_all_end_processed.csv',
+                        help='输入CSV文件路径 (默认: /home/maxon/disk2/roomMatch/room_match/rank_room/data/ranking_all_end_processed.csv)')
 
     # 划分模式参数
     parser.add_argument('--valid-size', type=float, default=0.1,
                         help='验证集比例 (默认: 0.1)')
     parser.add_argument('--test-size', type=float, default=0.1,
                         help='测试集比例 (默认: 0.1)')
-    parser.add_argument('--train-file', type=str, default='hotel_samples_train.csv',
-                        help='训练集输出路径 (默认: hotel_samples_train.csv)')
-    parser.add_argument('--valid-file', type=str, default='hotel_samples_valid.csv',
-                        help='验证集输出路径 (默认: hotel_samples_valid.csv)')    
-    parser.add_argument('--test-file', type=str, default='hotel_samples_test.csv',
-                        help='测试集输出路径 (默认: hotel_samples_test.csv)')
+    parser.add_argument('--train-file', type=str, default='ranking_all_train.csv',
+                        help='训练集输出路径 (默认: ranking_all_train.csv)')
+    parser.add_argument('--valid-file', type=str, default='ranking_all_valid.csv',
+                        help='验证集输出路径 (默认: ranking_all_valid.csv)')
+    parser.add_argument('--test-file', type=str, default='ranking_all_test.csv',
+                        help='测试集输出路径 (默认: ranking_all_test.csv)')
     parser.add_argument('--random-state', type=int, default=42,
                         help='随机种子 (默认: 42)')
 
@@ -258,11 +162,9 @@ def main():
     try:
         # 创建处理器
         processor = DataProcessor(args.input)
-        
-        # 先平衡样本再划分数据集
-        processor.balance_and_split(
-            args.label_column,
-            (args.pos_ratio, args.neg_ratio),
+
+        # 划分数据集
+        processor.split_datasets(
             args.valid_size,
             args.test_size,
             args.train_file,
@@ -270,7 +172,7 @@ def main():
             args.test_file,
             args.random_state
         )
-        
+
     except FileNotFoundError as e:
         logger.error(f"文件不存在: {str(e)}")
         sys.exit(1)

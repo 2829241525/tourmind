@@ -348,10 +348,10 @@ class HotelPredictor:
                 outputs = self.model(**encoded)
 
                 # 处理异常值（参考inference.py的处理方式）
-                if torch.isnan(outputs.logits).any():
-                    outputs.logits = torch.nan_to_num(
-                        outputs.logits, nan=-10.0)
-                    logger.warning("检测到NaN值，已替换为安全值")
+                # if torch.isnan(outputs.logits).any():
+                #     outputs.logits = torch.nan_to_num(
+                #         outputs.logits, nan=-10.0)
+                #     logger.warning("检测到NaN值，已替换为安全值")
 
                 # 获取正类的logits得分
                 batch_logits = outputs.logits[:, 1]
@@ -439,9 +439,9 @@ class HotelPredictor:
             similarities = self.calculate_similarity(logits)
 
             # 处理异常值（参考inference.py的处理方式）
-            if torch.isnan(similarities).any():
-                similarities = torch.nan_to_num(
-                    similarities, nan=0.0, posinf=1.0, neginf=0.0)
+            # if torch.isnan(similarities).any():
+            #     similarities = torch.nan_to_num(
+            #         similarities, nan=0.0, posinf=1.0, neginf=0.0)
 
             predictions = (similarities > threshold).float()
 
@@ -814,7 +814,7 @@ async def match_hotels(request: MatchRequest, background_tasks: BackgroundTasks)
 if __name__ == "__main__":
     config = {
         'host': '0.0.0.0',
-        'port': 13102,
+        'port': 13101,
         'workers': 1,
         'log_level': 'info',
         'limit_concurrency': 100,
